@@ -107,7 +107,7 @@ export function compileAgentBrowserSemanticAction(input: unknown): { compiled?: 
 		if (text !== undefined && typeof text !== "string") {
 			return { error: "semanticAction.text must be a string when provided." };
 		}
-		if (action === "fill" && (typeof text !== "string" || text.length === 0)) {
+		if (action === "fill" && typeof text !== "string") {
 			return { error: `semanticAction.text is required for ${action}.` };
 		}
 		if (action !== "fill" && text !== undefined) {
@@ -133,7 +133,7 @@ export function compileAgentBrowserSemanticAction(input: unknown): { compiled?: 
 	if (text !== undefined && typeof text !== "string") {
 		return { error: "semanticAction.text must be a string when provided." };
 	}
-	if (action === "fill" && (typeof text !== "string" || text.length === 0)) {
+	if (action === "fill" && typeof text !== "string") {
 		return { error: `semanticAction.text is required for ${action}.` };
 	}
 	if (action !== "fill" && text !== undefined) {

@@ -14,6 +14,12 @@ Related docs:
 
 This is the durable release-readiness checklist for the targeted upstream version in [`scripts/agent-browser-target.mjs`](../scripts/agent-browser-target.mjs), which `CAPABILITY_BASELINE.targetVersion` imports. It maps the capability inventory in [`scripts/agent-browser-capability-baseline.mjs`](../scripts/agent-browser-capability-baseline.mjs) to documentation, runtime handling, tests, and validation evidence. Update it whenever the target version or inventory changes.
 
+## Local Windows attached-form validation (unreleased)
+
+The local `fix/windows-attached-forms` branch adds explicit-empty semantic fill acceptance and direct native Windows launch for standard PATH installations. Nine focused unit tests pass. The opt-in `scripts/verify-windows-attached.mts` smoke passed eight checks against an authorized Windows Opera CDP browser: cold attach/completion, controlled React Unicode replacement, empty clearing through a trusted exact-page CDP fallback, custom combobox selection, identical-URL pinned isolation, untouched final submit, verified PNG, and `tab_gone` on target closure. It creates and cleans only disposable fixture tabs. Set `PI_BROWSER_SMOKE_CDP` explicitly; optional `PI_BROWSER_SMOKE_FALLBACK` supplies a local adapter module exposing `run` for integration testing.
+
+This is not a full release gate. The existing process suite has 11 Windows failures and one skip on both patched and untouched source; the existing semantic-recovery suite has one Windows argv-expectation failure on both. Controlled React empty fill is still an upstream limitation: accepted argv/empty DOM values alone do not establish updated application state. The wrapper's click-dispatch diagnostics remain enabled. No cross-platform release claim is made.
+
 ## Maintainer refresh checklist
 
 When upstream ships a new `agent-browser` or the inventory changes:
