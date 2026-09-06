@@ -303,6 +303,10 @@ For first-navigation setup, start on `about:blank`, then stage routes, cookies, 
 
 ### Selector strategy
 
+For attached authenticated forms, select a stable CDP target ID and enable `--pin-tab` before editing. Verify the expected heading/stage in addition to the URL; identical-URL tabs can hold different wizard stages. Attach once, then reuse the session. After two failed input attempts with fresh evidence, diagnose target identity or switch to an explicitly authorized verified transport; do not repeatedly reopen the application.
+
+An explicit empty `semanticAction` fill is supported, for example `{ "action": "fill", "selector": "#answer", "text": "" }`. Inspect derived application state, not just `input.value`: controlled React state may remain stale after upstream empty fill. The local opt-in regression command is `PI_BROWSER_SMOKE_CDP=http://127.0.0.1:9222 npx tsx scripts/verify-windows-attached.mts`; it creates disposable fixture tabs only and never submits a real form.
+
 Prefer targets in this order:
 
 1. Use a current `@ref` from the latest `snapshot -i` for visible interactive controls.

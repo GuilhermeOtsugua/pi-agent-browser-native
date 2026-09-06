@@ -34,6 +34,8 @@ Why:
 
 ### Direct subprocess execution
 
+On Windows, the wrapper resolves the first PATH installation's standalone or npm package-owned native executable and spawns it directly. This preserves empty arguments, Unicode and literal shell metacharacters, removes the PowerShell/.cmd overhead for standard installs, and allows the existing post-exit stdio grace to settle inherited daemon pipes. It does not treat a complete JSON envelope as proof of process exit. Custom shims without a recognizable adjacent native binary retain the PowerShell fallback rather than silently selecting another PATH installation.
+
 The extension should:
 - resolve `agent-browser` from `PATH`
 - invoke it directly on POSIX; on Windows, route through PowerShell with single-quoted argv so npm launchers and the native `.exe` receive the same command tail that a user would type, and terminate the full PowerShell/agent-browser process tree with `taskkill /T /F` on timeout or abort before falling back to the direct child signal

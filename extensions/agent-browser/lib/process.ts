@@ -31,6 +31,7 @@ import {
 import { getImplicitSessionIdleTimeoutMs } from "./runtime.js";
 import { getAgentBrowserProcessEnvironment } from "./process-environment.js";
 import { openSecureTempFile, writeSecureTempChunk } from "./temp.js";
+import { resolveWindowsNativeLauncher } from "./windows-native-launcher.js";
 
 const MAX_BUFFERED_STDOUT_BYTES = 512 * 1_024;
 const MAX_BUFFERED_STDERR_CHARS = 32_000;
@@ -152,7 +153,11 @@ export function prepareAgentBrowserSpawnArgs(args: string[], wrapperCompatibilit
 	return ["--args", `--user-agent=${wrapperCompatibilityUserAgent.replaceAll(/[\r\n,]/g, "")}`, ...args];
 }
 
-export function buildAgentBrowserSpawnCommand(args: string[], platform: NodeJS.Platform = processPlatform): { command: string; args: string[] } {
+export function buildAgentBrowserSpawnCommand(args: string[], platform: NodeJS.Platform = processPlatform, nativeWindowsExecutable?: string): { command: string; args: string[] } {
+	if (platform === "win32" && nativeWindowsExecutable) {
+		// Bypass PowerShell/.cmd: preserve empty strings, Unicode, and literal argv.
+		return { command: nativeWindowsExecutable, args };
+	}
 	if (platform !== "win32") {
 		return { command: "agent-browser", args };
 	}
@@ -545,6 +550,17 @@ export async function runAgentBrowserProcess(options: {
 	if (signal?.aborted) {
 		return { aborted: true, agentBrowserStarted: false, exitCode: 1, stderr: "", stdout: "", timedOut: false };
 	}
+	let nativeWindowsExecutable: string | undefined;
+	try {
+		const childEnv = buildAgentBrowserProcessEnv(parentEnv, effectiveEnv);
+		const path = Object.entries(childEnv).find(([key]) => key.toLowerCase() === "path")?.[1];
+		nativeWindowsExecutable = processPlatform === "win32" ? await resolveWindowsNativeLauncher(path) : undefined;
+	} catch (error) {
+		return { aborted: false, agentBrowserStarted: false, exitCode: 127, stderr: "", stdout: "", timedOut: false, spawnError: error instanceof Error ? error : new Error(String(error)) };
+	}
+	if (signal?.aborted) {
+		return { aborted: true, agentBrowserStarted: false, exitCode: 1, stderr: "", stdout: "", timedOut: false };
+	}
 	return await new Promise<ProcessRunResult>((resolve) => {
 		let aborted = false;
 		let agentBrowserStarted = false;
@@ -652,13 +668,14 @@ export async function runAgentBrowserProcess(options: {
 			resolve({ aborted: false, agentBrowserStarted: false, exitCode: 1, spawnError: new Error(spawnPolicyError), stderr: "", stdout: "", timedOut: false });
 			return;
 		}
-		const spawnCommand = buildAgentBrowserSpawnCommand(prepareAgentBrowserSpawnArgs(args, ownedManagedSessionCompatibilityEnv.AGENT_BROWSER_USER_AGENT, preserveAttachedBrowserSession));
+		const spawnCommand = buildAgentBrowserSpawnCommand(prepareAgentBrowserSpawnArgs(args, ownedManagedSessionCompatibilityEnv.AGENT_BROWSER_USER_AGENT, preserveAttachedBrowserSession), processPlatform, nativeWindowsExecutable);
 		const child = spawn(spawnCommand.command, spawnCommand.args, {
 			cwd,
 			env: childEnv,
 			stdio: ["pipe", "pipe", "pipe"],
+			windowsHide: true,
 		});
-		if (processPlatform !== "win32") {
+		if (processPlatform !== "win32" || nativeWindowsExecutable) {
 			child.once("spawn", () => {
 				agentBrowserStarted = true;
 				commitManagedSessionRestoreSuppression(managedSessionRestoreOptions);
