@@ -5,9 +5,10 @@
  * Scope: Maintainer/user setup CLI only; canonical config validation, merge, provider descriptors, and status projection live in extensions/agent-browser/lib/config-policy.js.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 async function loadConfigPolicyModule() {
 	const sourcePolicyUrl = new URL("../extensions/agent-browser/lib/config-policy.js", import.meta.url);
@@ -363,7 +364,8 @@ export async function main(argv = process.argv.slice(2)) {
 	throw new UsageError(`Unknown command: ${command}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && existsSync(process.argv[1])
+	&& import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
 	main().catch((error) => {
 		if (error instanceof UsageError) {
 			console.error(error.message);

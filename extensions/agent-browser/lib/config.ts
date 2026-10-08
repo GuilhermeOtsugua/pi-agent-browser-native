@@ -133,11 +133,12 @@ export function loadAgentBrowserConfigSync(options: AgentBrowserConfigLoadOption
 	return loadAgentBrowserConfigStateSync(options);
 }
 
-async function resolveCommandCredential(rawValue: string, signal?: AbortSignal): Promise<string | undefined> {
+async function resolveCommandCredential(rawValue: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string | undefined> {
 	const command = rawValue.slice(1).trim();
 	if (!command) return undefined;
 	try {
 		const result = await exec(command, {
+			env,
 			signal,
 			timeout: SECRET_COMMAND_TIMEOUT_MS,
 			maxBuffer: 1024 * 1024,
@@ -157,7 +158,7 @@ export async function resolveCredentialSource(
 	if (!source) return undefined;
 	let value: string | undefined;
 	if (source.kind === "command") {
-		value = await resolveCommandCredential(source.rawValue, options.signal);
+		value = await resolveCommandCredential(source.rawValue, options.env ?? process.env, options.signal);
 	} else if (source.kind === "env") {
 		value = resolveEnvInterpolations(source.rawValue, options.env ?? process.env)?.trim();
 	} else {

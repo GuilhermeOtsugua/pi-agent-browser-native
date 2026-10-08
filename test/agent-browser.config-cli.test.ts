@@ -4,15 +4,31 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 const CONFIG_SCRIPT = join(process.cwd(), "scripts", "config.mjs");
 const DOCUMENTED_CONFIG_HELPER_PREFIX = "npm exec --yes --package pi-agent-browser-native@latest -- pi-agent-browser-config";
-const LOCAL_PACKAGE_SPEC = process.cwd();
-const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
+const fixtureRoots: string[] = [];
+after(async () => {
+	for (const root of fixtureRoots) await rm(root, { recursive: true, force: true });
+});
+
+function npmLauncher(): { command: string; args: string[] } {
+	if (process.platform !== "win32") return { command: "npm", args: [] };
+	const candidates = [
+		process.env.npm_execpath,
+		join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+		...(process.env.PATH ?? "").split(";").map((path) => join(path, "node_modules", "npm", "bin", "npm-cli.js")),
+	];
+	const cli = candidates.find((path) => path?.endsWith("npm-cli.js") && existsSync(path));
+	assert.ok(cli, "native Windows npm CLI JavaScript entrypoint must be installed");
+	return { command: process.execPath, args: [cli] };
+}
 
 async function runProcess(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; label?: string } = {}) {
 	return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
@@ -20,6 +36,7 @@ async function runProcess(command: string, args: string[], options: { cwd?: stri
 			cwd: options.cwd ?? process.cwd(),
 			env: options.env ?? process.env,
 			stdio: ["pipe", "pipe", "pipe"],
+			timeout: 20_000,
 		});
 		let stdout = "";
 		let stderr = "";
@@ -49,6 +66,7 @@ async function runConfig(args: string[], options: { cwd?: string; env?: NodeJS.P
 
 async function createFixture() {
 	const root = await mkdtemp(join(tmpdir(), "pi-agent-browser-config-cli-test-"));
+	fixtureRoots.push(root);
 	const cwd = join(root, "repo");
 	const home = join(root, "home");
 	const npmCache = join(root, "npm-cache");
@@ -63,6 +81,8 @@ async function createFixture() {
 			USERPROFILE: home,
 			APPDATA: join(home, "AppData", "Roaming"),
 			NPM_CONFIG_CACHE: npmCache,
+			NPM_CONFIG_USERCONFIG: join(root, "npm-user.config"),
+			NPM_CONFIG_GLOBALCONFIG: join(root, "npm-global.config"),
 			BRAVE_API_KEY: undefined,
 			EXA_API_KEY: undefined,
 			PI_AGENT_BROWSER_CONFIG: undefined,
@@ -116,7 +136,7 @@ function tokenizeDocumentedCommand(command: string): string[] {
 	return tokens;
 }
 
-function documentedNpmExecArgs(command: string): { args: string[]; input?: string } {
+function documentedNpmExecArgs(command: string, localPackageSpec: string): { args: string[]; input?: string } {
 	let input: string | undefined;
 	let executable = command.trim();
 	const stdinPrefix = `printf '%s' "$EXA_API_KEY" | `;
@@ -129,18 +149,42 @@ function documentedNpmExecArgs(command: string): { args: string[]; input?: strin
 	const packageIndex = tokens.indexOf("--package");
 	assert.notEqual(packageIndex, -1, `documented command must use --package: ${command}`);
 	assert.equal(tokens[packageIndex + 1], "pi-agent-browser-native@latest", `documented command must use the published package spec: ${command}`);
-	tokens[packageIndex + 1] = LOCAL_PACKAGE_SPEC;
-	return { args: tokens.slice(1), input };
+	tokens[packageIndex + 1] = localPackageSpec;
+	return { args: [...tokens.slice(1, 2), "--offline", "--ignore-scripts", ...tokens.slice(2)], input };
 }
 
 test("config CLI prints Pi-scoped paths and pass-through setup help", async () => {
 	const fixture = await createFixture();
 	const { stdout } = await runConfig(["paths"], { cwd: fixture.cwd, env: fixture.env });
-	assert.match(stdout, /\.pi\/config\/pi-agent-browser-native\/config\.json/);
+	assert.ok(stdout.includes(`Global: ${fixture.globalPath}`));
+	assert.ok(stdout.includes(`Project: ${fixture.projectPath}`));
 	const { stdout: help } = await runConfig(["--help"], { cwd: fixture.cwd, env: fixture.env });
 	assert.match(help, /Loaded config may use plaintext, environment interpolation, or !command credential sources/);
 	assert.match(help, /displayed status redacts resolved keys/);
 	assert.doesNotMatch(help, /^  pi-agent-browser-config/m);
+});
+
+test("config CLI runs from encoded paths but stays silent when imported", async () => {
+	const fixture = await createFixture();
+	const packageRoot = join(fixture.root, "package space # ü");
+	const script = join(packageRoot, "scripts", "config.mjs");
+	const policy = join(packageRoot, "dist", "extensions", "agent-browser", "lib", "config-policy.js");
+	await mkdir(dirname(script), { recursive: true });
+	await mkdir(dirname(policy), { recursive: true });
+	await writeFile(join(packageRoot, "package.json"), '{"type":"module"}');
+	await writeFile(script, await readFile(CONFIG_SCRIPT));
+	await writeFile(policy, await readFile(join(process.cwd(), "extensions", "agent-browser", "lib", "config-policy.js")));
+	const direct = await runProcess(process.execPath, [script, "paths"], { cwd: fixture.cwd, env: fixture.env });
+	assert.ok(direct.stdout.includes(fixture.globalPath));
+	for (const extraArgs of [[], ["--", "nonexistent-eval-argument"]]) {
+		const imported = await runProcess(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(script).href)})`, ...extraArgs], {
+			cwd: fixture.cwd, env: fixture.env,
+		});
+		assert.equal(imported.stdout, "");
+		assert.equal(imported.stderr, "");
+	}
+	assert.equal(existsSync(fixture.globalPath), false);
+	assert.equal(existsSync(fixture.projectPath), false);
 });
 
 test("published package config docs only use npm-exec helper examples", async () => {
@@ -159,6 +203,20 @@ test("published package config docs only use npm-exec helper examples", async ()
 
 test("documented npm-exec package config examples execute against an isolated config", async () => {
 	const fixture = await createFixture();
+	// A dependency-free local package exercises npm's real bin launcher and the
+	// packed dist-policy fallback without dependency installs, lifecycle scripts, or network.
+	const localPackageSpec = join(fixture.root, "local-package");
+	await mkdir(join(localPackageSpec, "scripts"), { recursive: true });
+	await mkdir(join(localPackageSpec, "dist", "extensions", "agent-browser", "lib"), { recursive: true });
+	await writeFile(join(localPackageSpec, "package.json"), JSON.stringify({
+		name: "pi-agent-browser-native", version: "0.0.0", type: "module",
+		bin: { "pi-agent-browser-config": "scripts/config.mjs" },
+	}));
+	await writeFile(join(localPackageSpec, "scripts", "config.mjs"), await readFile(CONFIG_SCRIPT));
+	await chmod(join(localPackageSpec, "scripts", "config.mjs"), 0o755);
+	await writeFile(join(localPackageSpec, "dist", "extensions", "agent-browser", "lib", "config-policy.js"),
+		await readFile(join(process.cwd(), "extensions", "agent-browser", "lib", "config-policy.js")));
+	const launcher = npmLauncher();
 	const documentedCommands = new Map<string, string>();
 	for (const path of ["README.md", "docs/COMMAND_REFERENCE.md"]) {
 		const text = await readFile(path, "utf8");
@@ -170,13 +228,15 @@ test("documented npm-exec package config examples execute against an isolated co
 	}
 	assert.notEqual(documentedCommands.size, 0);
 	for (const [command, path] of documentedCommands) {
-		const { args, input } = documentedNpmExecArgs(command);
-		await runProcess(NPM_COMMAND, args, {
+		const { args, input } = documentedNpmExecArgs(command, localPackageSpec);
+		const { stdout, stderr } = await runProcess(launcher.command, [...launcher.args, ...args], {
 			cwd: fixture.cwd,
 			env: { ...fixture.env, EXA_API_KEY: "doc-secret-exa-key" },
 			input,
 			label: `${path} documented npm-exec config example`,
 		});
+		assert.notEqual(stdout.trim(), "");
+		assert.doesNotMatch(stdout + stderr, /doc-secret-exa-key/);
 	}
 });
 
@@ -189,6 +249,7 @@ test("config CLI writes and redacts global plaintext Brave key", async () => {
 	});
 	const raw = await readFile(fixture.globalPath, "utf8");
 	assert.match(raw, /real-secret-value/);
+	assert.equal(existsSync(fixture.projectPath), false);
 	const { stdout } = await runConfig(["show"], { cwd: fixture.cwd, env: fixture.env });
 	assert.match(stdout, /configured as plaintext global value \[redacted\]/);
 	assert.doesNotMatch(stdout, /real-secret-value/);
@@ -220,6 +281,8 @@ test("config CLI requires providers for ambiguous credential writes", async () =
 			return true;
 		},
 	);
+	assert.equal(existsSync(fixture.globalPath), false);
+	assert.equal(existsSync(fixture.projectPath), false);
 });
 
 test("config CLI writes project-local Brave key sources and redacts status", async () => {
@@ -231,6 +294,7 @@ test("config CLI writes project-local Brave key sources and redacts status", asy
 	});
 	let raw = await readFile(fixture.projectPath, "utf8");
 	assert.match(raw, /real-secret-value/);
+	assert.equal(existsSync(fixture.globalPath), false);
 	let { stdout } = await runConfig(["show"], { cwd: fixture.cwd, env: fixture.env });
 	assert.match(stdout, /configured as plaintext project value \[redacted\]/);
 	assert.doesNotMatch(stdout, /real-secret-value/);

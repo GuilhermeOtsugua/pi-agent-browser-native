@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { extractUpstreamCommandTokens } from "../extensions/agent-browser/lib/argv-descriptor.js";
+
 import {
 	createExtensionHarness,
 	executeRegisteredTool,
@@ -27,6 +29,7 @@ test("agentBrowserExtension redacts denied clipboard write payloads from all res
 	await writeFakeAgentBrowserBinary(
 		tempDir,
 		`const fs = require("node:fs");
+const { extractUpstreamCommandTokens } = require(${JSON.stringify(join(process.cwd(), "dist", "extensions", "agent-browser", "lib", "argv-descriptor.js"))});
 const args = process.argv.slice(2);
 let stdin = "";
 function clipboardError(command) {
@@ -42,7 +45,7 @@ process.stdin.on("end", () => {
     const steps = JSON.parse(stdin);
     process.stdout.write(JSON.stringify(steps.map((command) => ({ command, success: false, error: clipboardError(command) }))));
   } else {
-    process.stdout.write(JSON.stringify({ success: false, error: clipboardError(args.slice(args.indexOf("clipboard"))) }));
+    process.stdout.write(JSON.stringify({ success: false, error: clipboardError(extractUpstreamCommandTokens(args)) }));
   }
 });`,
 	);
@@ -57,7 +60,7 @@ process.stdin.on("end", () => {
 			assert.match((standalone.content[0] as { text: string }).text, /Agent-browser clipboard hint:/);
 			assert.doesNotMatch(JSON.stringify(standalone), /clipboard-secret/);
 			const firstInvocation = JSON.parse((await readFile(logPath, "utf8")).trim().split("\n")[0] ?? "{}");
-			assert.deepEqual(firstInvocation.args.slice(-3), ["clipboard", "write", "clipboard-secret"]);
+			assert.deepEqual(extractUpstreamCommandTokens(firstInvocation.args), ["clipboard", "write", "clipboard-secret"]);
 
 			const multiline = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["clipboard", "write", "clipboard-secret\nsecond-secret"] });
 			assert.equal(multiline.isError, true, JSON.stringify(multiline));

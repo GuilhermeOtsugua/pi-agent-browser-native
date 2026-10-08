@@ -3,10 +3,11 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import {
 	BRAVE_API_KEY_ENV,
@@ -20,8 +21,19 @@ import {
 	getCredentialSourceSummary,
 	loadAgentBrowserConfig,
 	loadAgentBrowserConfigSync,
+	resolveCredentialSource,
+	resolvePreferredWebSearchCredential,
 	resolveWebSearchCredential,
 } from "../extensions/agent-browser/lib/config.js";
+
+const fixtureRoots: string[] = [];
+after(async () => {
+	for (const root of fixtureRoots) await rm(root, { recursive: true, force: true });
+});
+
+function quoteShellPath(path: string): string {
+	return process.platform === "win32" ? `"${path}"` : `'${path.replace(/'/g, `'"'"'`)}'`;
+}
 
 async function writeJson(path: string, value: unknown): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
@@ -30,13 +42,14 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 
 async function createConfigFixture() {
 	const root = await mkdtemp(join(tmpdir(), "pi-agent-browser-config-test-"));
+	fixtureRoots.push(root);
 	const home = join(root, "home");
 	const cwd = join(root, "repo");
 	await mkdir(home, { recursive: true });
 	await mkdir(cwd, { recursive: true });
 	return {
 		cwd,
-		env: { HOME: home, [BRAVE_API_KEY_ENV]: undefined, [EXA_API_KEY_ENV]: undefined } as NodeJS.ProcessEnv,
+		env: { HOME: home, USERPROFILE: home, [BRAVE_API_KEY_ENV]: undefined, [EXA_API_KEY_ENV]: undefined } as NodeJS.ProcessEnv,
 		globalPath: join(home, ".pi", "config", "pi-agent-browser-native", "config.json"),
 		projectPath: join(cwd, ".pi", "config", "pi-agent-browser-native", "config.json"),
 		root,
@@ -104,16 +117,45 @@ test("can skip project config when caller opts out", async () => {
 	assert.equal(canRegisterWebSearchTool(state, env), true);
 });
 
-test("registers command credential sources without executing them at startup", async () => {
+test("registers command credential sources without executing them at startup", { timeout: 20_000 }, async () => {
 	const fixture = await createConfigFixture();
+	const script = join(fixture.root, "secret manager ü.cjs");
+	const marker = join(fixture.root, "command-ran");
+	await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE })); process.stdout.write(process.env.FIXTURE_SECRET || '');`);
 	await writeJson(fixture.globalPath, {
 		version: 1,
-		webSearch: { braveApiKey: `!${process.execPath} -e "process.stdout.write('command-secret')"` },
+		webSearch: { braveApiKey: `!${quoteShellPath(process.execPath)} ${quoteShellPath(script)}` },
 	});
 	const state = loadAgentBrowserConfigSync({ cwd: fixture.cwd, env: fixture.env });
 	assert.equal(canRegisterWebSearchTool(state, fixture.env), true);
-	const resolved = await resolveWebSearchCredential(state, "brave", { env: fixture.env });
+	assert.equal(existsSync(marker), false);
+	const resolved = await resolveWebSearchCredential(state, "brave", { env: { ...fixture.env, FIXTURE_SECRET: "command-secret" } });
 	assert.equal(resolved?.value, "command-secret");
+	assert.deepEqual(JSON.parse(await readFile(marker, "utf8")), { HOME: fixture.env.HOME, USERPROFILE: fixture.env.USERPROFILE });
+});
+
+test("missing and failed credential sources retain safe behavior", { timeout: 20_000 }, async () => {
+	const fixture = await createConfigFixture();
+	assert.equal(await resolveCredentialSource(undefined, { env: fixture.env }), undefined);
+	assert.equal(await resolveCredentialSource({ kind: "env", rawValue: "$MISSING_FIXTURE_KEY", scope: "global" }, { env: fixture.env }), undefined);
+	const script = join(fixture.root, "failed secret manager.cjs");
+	await writeFile(script, "process.stdout.write('stdout-secret'); process.stderr.write('stderr-secret'); process.exit(1);");
+	await assert.rejects(() => resolveCredentialSource({ kind: "command", rawValue: `!${quoteShellPath(process.execPath)} ${quoteShellPath(script)}`, scope: "global" }, { env: fixture.env }), (error: Error) => {
+		assert.match(error.message, /Credential command failed without exposing command output/);
+		assert.doesNotMatch(error.message, /stdout-secret|stderr-secret/);
+		return true;
+	});
+	await writeFile(script, "process.stdout.write('  ');");
+	assert.equal(await resolveCredentialSource({ kind: "command", rawValue: `!${quoteShellPath(process.execPath)} ${quoteShellPath(script)}`, scope: "global" }, { env: fixture.env }), undefined);
+});
+
+test("preferred provider falls back only when its credential is missing", async () => {
+	const fixture = await createConfigFixture();
+	await writeJson(fixture.globalPath, { version: 1, webSearch: { preferredProvider: "brave", braveApiKey: "$FIXTURE_BRAVE", exaApiKey: "$FIXTURE_EXA" } });
+	const state = loadAgentBrowserConfigSync({ cwd: fixture.cwd, env: fixture.env });
+	const env = { ...fixture.env, FIXTURE_BRAVE: "brave-fixture", FIXTURE_EXA: "exa-fixture" };
+	assert.equal((await resolvePreferredWebSearchCredential(state, { env }))?.provider, "brave");
+	assert.equal((await resolvePreferredWebSearchCredential(state, { env: { ...env, FIXTURE_BRAVE: undefined } }))?.provider, "exa");
 });
 
 test("captures browser defaults with conservative profile policy and executable path", async () => {
