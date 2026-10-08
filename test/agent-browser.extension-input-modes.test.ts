@@ -11,11 +11,14 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { isDeepStrictEqual } from 'node:util';
 
 import { Check } from "typebox/value";
 
 import { analyzeQaPresetResults, analyzeQaPresetTimeout, compileAgentBrowserJob, compileAgentBrowserQaPreset } from "../extensions/agent-browser/lib/input-modes/job.js";
 import { compileAgentBrowserSemanticAction } from "../extensions/agent-browser/lib/input-modes/semantic-action.js";
+import { extractUpstreamCommandTokens } from "../extensions/agent-browser/lib/argv-descriptor.js";
+import { extractExplicitSessionName } from "../extensions/agent-browser/lib/argv-grammar.js";
 import {
 	createExtensionHarness,
 	executeRegisteredTool,
@@ -357,17 +360,23 @@ process.stdout.write(JSON.stringify({ success: true, data: { args, title: "Click
 			assert.equal(selectResult.details?.sessionName, "named");
 
 			const invocationLog = await readInvocationLog(logPath);
-			const invocations = invocationLog.filter((entry) => entry.args.includes("find"));
-			assert.deepEqual(invocations[0]?.args.slice(-6), ["find", "role", "button", "click", "--name", "Export"]);
-			assert.deepEqual(invocations[1]?.args.slice(-6), ["find", "role", "button", "click", "--name", "Continue without Signing In"]);
-			assert.deepEqual(invocations[2]?.args.slice(-5), ["find", "label", "Email", "fill", "user@example.test"]);
-			assert.deepEqual(invocationLog.find((entry) => entry.args.at(-3) === "fill" && entry.args.at(-2) === "@e1")?.args.slice(-3), ["fill", "@e1", "selector text"]);
-			assert.deepEqual(invocationLog.find((entry) => entry.args.at(-2) === "click" && entry.args.at(-1) === "#submit")?.args.slice(-2), ["click", "#submit"]);
-			assert.deepEqual(invocationLog.find((entry) => entry.args.at(-2) === "check" && entry.args.at(-1) === "@e4")?.args.slice(-4), ["--session", "named", "check", "@e4"]);
-			assert.deepEqual(invocations[3]?.args.slice(-4), ["find", "text", "Close", "click"]);
-			assert.deepEqual(invocations[4]?.args.slice(-6), ["--session", "named", "find", "text", "Close", "click"]);
-			const selectInvocation = invocationLog.find((entry) => entry.args.includes("select"));
-			assert.deepEqual(selectInvocation?.args.slice(-5), ["--session", "named", "select", "#flavor-select", "chocolate"]);
+			const commands = invocationLog.map(entry => extractUpstreamCommandTokens(entry.args));
+			const finds = commands.filter(command => command[0] === 'find');
+			assert.deepEqual(finds[0], ["find", "role", "button", "click", "--name", "Export"]);
+			assert.deepEqual(finds[1], ["find", "role", "button", "click", "--name", "Continue without Signing In"]);
+			assert.deepEqual(finds[2], ["find", "label", "Email", "fill", "user@example.test"]);
+			assert.deepEqual(commands.find(command => command[0] === 'fill' && command[1] === '@e1'), ["fill", "@e1", "selector text"]);
+			assert.deepEqual(commands.find(command => command[0] === 'click' && command[1] === '#submit'), ["click", "#submit"]);
+			const checkInvocation = invocationLog.find(entry => extractUpstreamCommandTokens(entry.args)[0] === 'check');
+			assert.deepEqual(extractUpstreamCommandTokens(checkInvocation?.args ?? []), ["check", "@e4"]);
+			assert.equal(extractExplicitSessionName(checkInvocation?.args ?? []), 'named');
+			assert.deepEqual(finds[3], ["find", "text", "Close", "click"]);
+			assert.deepEqual(finds[4], ["find", "text", "Close", "click"]);
+			const namedFind = invocationLog.filter(entry => extractUpstreamCommandTokens(entry.args)[0] === 'find')[4];
+			assert.equal(extractExplicitSessionName(namedFind?.args ?? []), 'named');
+			const selectInvocation = invocationLog.find(entry => extractUpstreamCommandTokens(entry.args)[0] === 'select');
+			assert.deepEqual(extractUpstreamCommandTokens(selectInvocation?.args ?? []), ["select", "#flavor-select", "chocolate"]);
+			assert.equal(extractExplicitSessionName(selectInvocation?.args ?? []), 'named');
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -421,7 +430,7 @@ if (args.includes("open")) {
 			assert.deepEqual((result.details?.effectiveArgs as string[] | undefined)?.slice(-3), ["fill", "@e17", "pi issue 70 search"]);
 			const invocations = await readInvocationLog(logPath);
 			assert.ok(invocations.some((entry) => entry.args.includes("snapshot")));
-			assert.ok(invocations.some((entry) => entry.args.at(-3) === "fill" && entry.args.at(-2) === "@e17" && entry.args.at(-1) === "pi issue 70 search"));
+			assert.ok(invocations.some((entry) => isDeepStrictEqual(extractUpstreamCommandTokens(entry.args), ['fill', '@e17', 'pi issue 70 search'])));
 			assert.equal(invocations.some((entry) => entry.args.includes("find")), false);
 		});
 	} finally {
@@ -549,7 +558,7 @@ if (args.includes("open")) {
 			assert.deepEqual((result.details?.effectiveArgs as string[] | undefined)?.slice(-2), ["click", "@e17"]);
 			const invocations = await readInvocationLog(logPath);
 			assert.ok(invocations.some((entry) => entry.args.includes("snapshot")));
-			assert.ok(invocations.some((entry) => entry.args.at(-2) === "click" && entry.args.at(-1) === "@e17"));
+			assert.ok(invocations.some((entry) => isDeepStrictEqual(extractUpstreamCommandTokens(entry.args), ['click', '@e17'])));
 			assert.equal(invocations.some((entry) => entry.args.includes("find")), false);
 		});
 	} finally {
@@ -604,8 +613,8 @@ if (args.includes("open")) {
 			assert.equal(dashOption.isError, false, JSON.stringify(dashOption));
 			assert.deepEqual((dashOption.details?.effectiveArgs as string[] | undefined)?.slice(-3), ["select", "@e4", "-1"]);
 			const invocations = await readInvocationLog(logPath);
-			assert.ok(invocations.some((entry) => entry.args.at(-3) === "select" && entry.args.at(-2) === "@e4" && entry.args.at(-1) === "chocolate"));
-			assert.ok(invocations.some((entry) => entry.args.at(-3) === "select" && entry.args.at(-2) === "@e4" && entry.args.at(-1) === "-1"));
+			assert.ok(invocations.some((entry) => isDeepStrictEqual(extractUpstreamCommandTokens(entry.args), ['select', '@e4', 'chocolate'])));
+			assert.ok(invocations.some((entry) => isDeepStrictEqual(extractUpstreamCommandTokens(entry.args), ['select', '@e4', '-1'])));
 			assert.equal(invocations.some((entry) => entry.args.includes("find")), false);
 		});
 	} finally {
@@ -658,7 +667,7 @@ if (args.includes("open")) {
 			assert.deepEqual((result.details?.effectiveArgs as string[] | undefined)?.slice(-3), ["fill", "@e17", "query"]);
 			const invocations = await readInvocationLog(logPath);
 			assert.equal(invocations.filter((entry) => entry.args.includes("snapshot")).length, 2);
-			assert.ok(invocations.some((entry) => entry.args.at(-3) === "fill" && entry.args.at(-2) === "@e17" && entry.args.at(-1) === "query"));
+			assert.ok(invocations.some((entry) => isDeepStrictEqual(extractUpstreamCommandTokens(entry.args), ['fill', '@e17', 'query'])));
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -761,7 +770,7 @@ process.stdin.on("end", () => {
 			assert.deepEqual(JSON.parse(redactedCompiledJob?.stdin ?? "[]"), redactedCompiledJob?.steps?.map((step) => step.args));
 
 			const invocations = await readInvocationLog(logPath);
-			assert.deepEqual(invocations[0]?.args.slice(-2), ["batch", "--bail"]);
+			assert.deepEqual(extractUpstreamCommandTokens(invocations[0]?.args ?? []), ["batch", "--bail"]);
 			const upstreamSteps = JSON.parse(invocations[0]?.stdin ?? "[]") as string[][];
 			assert.deepEqual(upstreamSteps.slice(0, 15), compiledJob?.steps?.slice(0, 15).map((step) => step.args));
 			assert.equal(upstreamSteps[15]?.[0], "screenshot");
@@ -1139,7 +1148,7 @@ process.stdin.on("end", () => {
 				["screenshot", "qa.png"],
 			]);
 			const invocations = await readInvocationLog(logPath);
-			assert.ok(invocations.filter((entry) => entry.args.at(-2) === "batch" && entry.args.at(-1) === "--bail").length >= 3);
+			assert.ok(invocations.filter(entry => isDeepStrictEqual(extractUpstreamCommandTokens(entry.args), ['batch', '--bail'])).length >= 3);
 
 			const firstRunFailureHarness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(firstRunFailureHarness.handlers, "session_start", { reason: "new" }, firstRunFailureHarness.ctx);
@@ -1186,7 +1195,7 @@ process.stdin.on("end", () => {
 			assert.match(attachedCompiledQaSteps[1]?.[2] ?? "", /Welcome/);
 			assert.deepEqual(attachedCompiledQaSteps[1]?.slice(3), ["--timeout", "5000"]);
 			assert.deepEqual(attachedCompiledQaSteps.slice(2), [["wait", "main"]]);
-			const attachedInvocation = [...await readInvocationLog(logPath)].reverse().find((entry) => entry.args.at(-2) === "batch" && entry.args.at(-1) === "--bail" && entry.stdin?.trim().startsWith("["));
+			const attachedInvocation = [...await readInvocationLog(logPath)].reverse().find(entry => isDeepStrictEqual(extractUpstreamCommandTokens(entry.args), ['batch', '--bail']) && entry.stdin?.trim().startsWith('['));
 			assert.ok(attachedInvocation);
 			const attachedSteps = JSON.parse(attachedInvocation.stdin ?? "[]") as string[][];
 			assert.equal(attachedSteps.some((step) => step[0] === "open"), false);
@@ -1313,7 +1322,7 @@ process.stdin.on("end", () => {
 			assert.equal(attachedResult.isError, false);
 			assert.match(attachedResult.content[0]?.text ?? "", /QA preset passed\./);
 			const invocations = await readInvocationLog(logPath);
-			const batchIndex = invocations.findIndex((entry) => entry.args.at(-2) === "batch" && entry.args.at(-1) === "--bail");
+			const batchIndex = invocations.findIndex(entry => isDeepStrictEqual(extractUpstreamCommandTokens(entry.args), ['batch', '--bail']));
 			assert.ok(batchIndex >= 0);
 			const preflightInvocations = invocations.slice(0, batchIndex);
 			assert.ok(preflightInvocations.some((entry) => entry.args.includes("get") && entry.args.includes("url")));
