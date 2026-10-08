@@ -22,14 +22,25 @@ import {
 	writeFakeAgentBrowserBinary,
 } from "./helpers/agent-browser-harness.js";
 
-const stripWrapperPrefix = (args: string[]) => {
-	const stripped = [...args];
-	if (stripped[0] === "--allow-file-access") stripped.splice(0, 2);
-	if (stripped[0] === "--json") stripped.shift();
-	if (stripped[0] === "--namespace") stripped.splice(0, 2);
-	if (stripped[0] === "--session") stripped.splice(0, 2);
+import { extractUpstreamCommandTokens } from '../extensions/agent-browser/lib/argv-descriptor.js';
+import { reorderWindowsLeadingGlobalArgs } from '../extensions/agent-browser/lib/process.js';
+
+// Remove wrapper transport flags wherever the shim placed them; retain caller
+// provider/device flags so these tests still verify their exact forwarding.
+function stripWrapperPrefix(args: string[]): string[] {
+	const stripped: string[] = [];
+	for (let index = 0; index < args.length; index++) {
+		const token = args[index];
+		if (token === '--json' || token === '--allow-file-access') {
+			if (args[index + 1] === 'true' || args[index + 1] === 'false') index++;
+		} else if (token === '--namespace' || token === '--session') {
+			index++;
+		} else {
+			stripped.push(token);
+		}
+	}
 	return stripped;
-};
+}
 
 test("agentBrowserExtension keeps successful plain-text inspection stateless and machine-readable", { concurrency: false }, async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-test-"));
@@ -192,15 +203,16 @@ test("agentBrowserExtension passes through plugin list/show and blocks bare mcp 
 		`const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args }) + "\\n");
-const commandIndex = args.indexOf("plugin");
-const command = commandIndex >= 0 ? "plugin" : args.includes("mcp") ? "mcp" : "unknown";
-const subcommand = command === "plugin" ? (args[commandIndex + 1] || "list") : undefined;
+const commandArgs = args.filter(arg => arg !== '--json');
+const commandIndex = commandArgs.indexOf("plugin");
+const command = commandIndex >= 0 ? "plugin" : commandArgs.includes("mcp") ? "mcp" : "unknown";
+const subcommand = command === "plugin" ? (commandArgs[commandIndex + 1] || "list") : undefined;
 if (command === "mcp" && args.includes("--help")) {
   process.stdout.write("agent-browser mcp - Start an MCP stdio server\\nUsage: agent-browser mcp [--tools <profiles>]\\n");
 } else if (subcommand === "list") {
   process.stdout.write(JSON.stringify({ plugins: [{ name: "demo", capabilities: ["command.run"] }] }));
 } else if (subcommand === "show") {
-  process.stdout.write(JSON.stringify({ plugin: { name: args[commandIndex + 2], capabilities: ["command.run"] } }));
+  process.stdout.write(JSON.stringify({ plugin: { name: commandArgs[commandIndex + 2], capabilities: ["command.run"] } }));
 } else {
   process.stdout.write(JSON.stringify({ success: false, error: "unexpected command" }));
 }`,
@@ -233,10 +245,10 @@ if (command === "mcp" && args.includes("--help")) {
 			assert.match(mcpHelpWord.content[0]?.text ?? "", /external MCP clients/);
 
 			assert.deepEqual(await readInvocationLog(logPath), [
-				{ args: ["--json", "plugin", "list"] },
-				{ args: ["--json", "plugin", "show", "demo"] },
-				{ args: ["mcp", "--help"] },
-			]);
+				["--json", "plugin", "list"],
+				["--json", "plugin", "show", "demo"],
+				["mcp", "--help"],
+			].map(args => ({ args: process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs(args) : args })));
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -252,8 +264,9 @@ test("agentBrowserExtension keeps skills inspection flows stateless and useful",
 		`const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args }) + "\\n");
-const commandStart = args.indexOf("skills");
-const subcommand = args[commandStart + 1];
+const commandArgs = args.filter(arg => arg !== '--json');
+const commandStart = commandArgs.indexOf("skills");
+const subcommand = commandArgs[commandStart + 1];
 if (subcommand === "list") {
   process.stdout.write(JSON.stringify({ success: true, data: [{ name: "core", description: "Core usage guide" }] }));
 } else if (subcommand === "get") {
@@ -285,10 +298,10 @@ if (subcommand === "list") {
 			assert.match((path.content[0] as { text: string }).text, /\/tmp\/agent-browser-skills\/core/);
 
 			assert.deepEqual(await readInvocationLog(logPath), [
-				{ args: ["--json", "skills", "list"] },
-				{ args: ["--json", "skills", "get", "core", "--full"] },
-				{ args: ["--json", "skills", "path", "core"] },
-			]);
+				["--json", "skills", "list"],
+				["--json", "skills", "get", "core", "--full"],
+				["--json", "skills", "path", "core"],
+			].map(args => ({ args: process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs(args) : args })));
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -369,19 +382,19 @@ if (skillIndex >= 0 && args[skillIndex + 1] === "get") {
 				const invocations = await readInvocationLog(logPath);
 				const providerInvocations = invocations.filter((entry) => {
 					const userArgs = stripWrapperPrefix(entry.args);
-					return entry.args[1] === "--session" && userArgs.length > 0 && userArgs[0] !== "close";
+					return entry.args.includes('--session') && userArgs.length > 0 && extractUpstreamCommandTokens(entry.args)[0] !== 'close';
 				});
 				const sessionfulProviderCommands = providerCommands.filter((args) => !(args[0] === "-p" && args[1] === "ios" && args[2] === "device"));
-				assert.deepEqual(providerInvocations.map((entry) => stripWrapperPrefix(entry.args)), sessionfulProviderCommands.map((args) => [...args]));
-				assert.deepEqual(invocations.find((entry) => entry.args.includes("device") && entry.args.includes("list"))?.args, ["--json", "-p", "ios", "device", "list"]);
-				assert.ok(providerInvocations.every((entry) => entry.args[0] === "--json" && entry.args[1] === "--session"));
+				assert.deepEqual(providerInvocations.map((entry) => stripWrapperPrefix(entry.args)), sessionfulProviderCommands.map(args => process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs([...args]) : [...args]));
+				assert.deepEqual(invocations.find((entry) => entry.args.includes("device") && entry.args.includes("list"))?.args, process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs(["--json", "-p", "ios", "device", "list"]) : ["--json", "-p", "ios", "device", "list"]);
+				assert.ok(providerInvocations.every(entry => entry.args.includes('--json') && entry.args.includes('--session')));
 				assert.ok(providerInvocations.some((entry) => entry.iosDevice === "iPhone 15 Pro"));
 				assert.ok(providerInvocations.some((entry) => entry.agentcoreApiKey === "agentcore-key"));
 				assert.ok(providerInvocations.some((entry) => entry.browserbaseApiKey === "browserbase-key"));
 				assert.ok(providerInvocations.some((entry) => entry.browserlessApiKey === "browserless-key"));
 				assert.ok(providerInvocations.some((entry) => entry.browserUseApiKey === "browser-use-key"));
 				assert.ok(providerInvocations.some((entry) => entry.kernelApiKey === "kernel-key"));
-				assert.deepEqual(invocations.filter((entry) => entry.args[1] === "skills").map((entry) => entry.args), skillCommands.map((args) => ["--json", ...args]));
+				assert.deepEqual(invocations.filter(entry => extractUpstreamCommandTokens(entry.args)[0] === 'skills').map(entry => entry.args), skillCommands.map(args => process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs(['--json', ...args]) : ['--json', ...args]));
 			},
 		);
 	} finally {
@@ -753,7 +766,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				return titleProbe ? [normalizedArgs, ["get", "url"], ["get", "title"]] : [normalizedArgs, ["get", "url"]];
 			});
 			assert.deepEqual(commandInvocations, expectedInvocations);
-			assert.ok(invocations.every((entry) => entry.args[0] === "--json" && entry.args.includes("--session")));
+			assert.ok(invocations.every((entry) => entry.args.includes("--json") && entry.args.includes("--session")));
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -779,6 +792,13 @@ for (let index = 0; index < args.length; index += 1) {
   commandIndex = index;
   break;
 }
+// Upstream removes transport globals throughout argv, including between a
+// command's adjacent subcommand and its operands on the Windows shim path.
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === "--json") { args.splice(index--, 1); }
+  else if (valueFlags.has(args[index])) { args.splice(index--, 2); }
+}
+commandIndex = 0;
 const command = args[commandIndex];
 const subcommand = args[commandIndex + 1];
 if (command === "state" && subcommand === "save") fs.writeFileSync(args[commandIndex + 2], "{}");
@@ -879,6 +899,11 @@ test("agentBrowserExtension passes through non-core network debug diff stream da
 const path = require("node:path");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, model: process.env.AI_GATEWAY_MODEL || null, apiKey: process.env.AI_GATEWAY_API_KEY || null }) + "\\n");
+// Match upstream transport parsing without removing caller model/body flags.
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === "--json") { args.splice(index--, 1); }
+  else if (["--allow-file-access", "--namespace", "--session"].includes(args[index])) { args.splice(index--, 2); }
+}
 const valueFlags = new Set(["--allow-file-access", "--session", "--model", "--port", "--body", "--resource-type", "--baseline"]);
 let commandIndex = -1;
 for (let i = 0; i < args.length; i += 1) {
@@ -924,6 +949,10 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 
 	const commands = [
 		["network", "route", "**/api", "--body", '{"token":"route-secret"}', "--resource-type", "fetch"],
+		// Keep the exact argv golden below: nested JSON must not lose quotes,
+		// split at spaces, or consume backslashes on the custom Windows shim.
+		["network", "route", "**/nested", "--body", JSON.stringify({ nested: { text: 'a "quoted" value', path: "C:\\space dir\\" } })],
+		["network", "unroute", "**/nested"],
 		["network", "unroute", "**/api"],
 		["network", "requests", "--filter", "example"],
 		["network", "request", "n1"],
@@ -989,7 +1018,9 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 
 			const invocations = await readInvocationLog(logPath);
 			const userInvocations = invocations.map((entry) => stripWrapperPrefix(entry.args));
-			assert.deepEqual(userInvocations, commands.map((args) => [...args]));
+			assert.deepEqual(userInvocations, commands.map((args) => stripWrapperPrefix(
+				process.platform === "win32" ? reorderWindowsLeadingGlobalArgs([...args]) : [...args],
+			)));
 			assert.ok(invocations.every((entry) => entry.args.includes("--json")));
 			assert.ok(invocations.every((entry) => {
 				const userArgs = stripWrapperPrefix(entry.args);
@@ -1184,8 +1215,9 @@ if (args.includes("get") && args.includes("url")) {
 			assert.equal(artifacts?.[0]?.status, "repaired-from-temp");
 
 			const invocations = await readInvocationLog(logPath);
-			assert.deepEqual(invocations[0]?.args.at(-2), "get");
-			assert.equal(invocations.at(-1)?.args.at(-1), expectedPath);
+			assert.deepEqual(extractUpstreamCommandTokens(invocations[0]?.args ?? []), ["get", "url"]);
+			assert.deepEqual(extractUpstreamCommandTokens(invocations.at(-1)?.args ?? []), ["screenshot", expectedPath]);
+			assert.ok(invocations.every((entry) => entry.args.includes("--json") && entry.args[entry.args.indexOf("--session") + 1] === "warden-vfr"));
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });

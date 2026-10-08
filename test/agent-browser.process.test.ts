@@ -39,7 +39,6 @@ import {
 	shouldCommitManagedRestoreAfterWindowsProcess,
 	runAgentBrowserProcess,
 } from "../extensions/agent-browser/lib/process.js";
-import { protectWindowsShimInvocation } from "../extensions/agent-browser/lib/windows-shim-job.js";
 import { parseAgentBrowserEnvelope } from "../extensions/agent-browser/lib/results/envelope.js";
 import {
 	cleanupSecureTempArtifacts,
@@ -225,17 +224,16 @@ process.stdout.write(JSON.stringify({ success: true, data: { allowFileAccessEnv:
 
 
 test("buildAgentBrowserSpawnCommand uses the npm cmd shim on Windows", () => {
-	assert.deepEqual(
-		buildAgentBrowserSpawnCommand(["--json", "--session", "managed", "open", "https://example.com"], "win32"),
-		{
-			command: "powershell.exe",
-			args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", protectWindowsShimInvocation("$agentBrowser = Get-Command agent-browser.cmd -ErrorAction SilentlyContinue; if (-not $agentBrowser) { [Console]::Error.WriteLine('PI_AGENT_BROWSER_COMMAND_NOT_FOUND:agent-browser.cmd'); exit 127 }; & $agentBrowser.Source 'open' '--json' '--session' 'managed' 'https://example.com'")],
-		},
-	);
-	assert.match(
-		buildAgentBrowserSpawnCommand(["--json", "--session", "managed", "webmcp", "invoke", "search", "--params", `{"query":"Mitch's browser"}`], "win32").args.at(-1) ?? "",
-		/& \$agentBrowser\.Source 'webmcp' 'invoke' '--json' '--session' 'managed' 'search' '--params' '\{"query":"Mitch''s browser"\}';/,
-	);
+	const spawn = buildAgentBrowserSpawnCommand(["--json", "--session", "managed", "open", "https://example.com"], "win32");
+	assert.equal(spawn.command, 'powershell.exe');
+	assert.deepEqual(spawn.args.slice(0, -1), ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command']);
+	const script = spawn.args.at(-1) ?? '';
+	assert.ok(script.includes('Get-Command agent-browser.cmd'));
+	assert.ok(script.includes("$startInfo.Arguments = '/d /v:off /s /c \"\"' + $agentBrowser.Source + '\" \"open\" \"--json\" \"--session\" \"managed\" \"https://example.com\"\"';"));
+	const assignment = script.indexOf('$native::AssignProcessToJobObject');
+	assert.ok(assignment >= 0 && assignment < script.indexOf('[System.Diagnostics.Process]::Start'));
+	const quoted = buildAgentBrowserSpawnCommand(["--json", "--session", "managed", "webmcp", "invoke", "search", "--params", `{"query":"Mitch's browser"}`], "win32").args.at(-1) ?? '';
+	assert.ok(quoted.includes(String.raw`'" "webmcp" "invoke" "--json" "--session" "managed" "search" "--params" "{\"query\":\"Mitch''s browser\"}""'`));
 	assert.deepEqual(buildAgentBrowserSpawnCommand(["--version"], "darwin"), { command: "agent-browser", args: ["--version"] });
 });
 

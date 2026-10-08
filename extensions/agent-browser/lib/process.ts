@@ -50,6 +50,8 @@ const DEFAULT_AGENT_BROWSER_PROCESS_TIMEOUT_MS = 35_000;
 /** Grace period after `exit` before resolving when `close` is delayed by inherited stdio handles. */
 const EXIT_STDIO_GRACE_MS = 100;
 const WINDOWS_AGENT_BROWSER_MISSING_MARKER = "PI_AGENT_BROWSER_COMMAND_NOT_FOUND:agent-browser.cmd";
+const WINDOWS_SHIM_ARGV_FAILURE_MARKER = "PI_AGENT_BROWSER_WINDOWS_SHIM_ARGV_UNREPRESENTABLE:";
+const WINDOWS_SHIM_ARGV_REMEDY = "Use a standard agent-browser installation with its package-owned native executable, or put agent-browser.exe first on PATH.";
 const attachedBrowserSessionContext = new AsyncLocalStorage<boolean>();
 const WINDOWS_COMMANDS_WITH_ADJACENT_SUBCOMMAND = new Set([
 	"auth", "clipboard", "cookies", "dashboard", "device", "dialog", "diff", "find", "get", "is", "keyboard",
@@ -91,6 +93,24 @@ function appendTail(text: string, addition: string, maxChars: number): string {
 
 function quoteWindowsPowerShellArg(value: string): string {
 	return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** CRT quoting for a literal command line, not PowerShell's lossy native binder. */
+function quoteWindowsCommandLineArg(value: string): string {
+	return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
+}
+
+/** CMD expands percent expressions even inside quotes; a custom shim may enable
+ * delayed expansion. Embedded quotes also change CMD's metacharacter quote state
+ * across argv boundaries. Reject these unsupported combinations before dispatch,
+ * rather than silently corrupting data or interpreting it as shell syntax.
+ * This is a transport limitation only; the native executable path is unchanged.
+ */
+function validateWindowsShimArgs(args: string[]): void {
+	if (args.some(value => /[%!\r\n\0]/.test(value)) ||
+		(args.some(value => value.includes('"')) && args.some(value => /[&|<>^()]/.test(value)))) {
+		throw new Error(`${WINDOWS_SHIM_ARGV_FAILURE_MARKER} Custom .cmd transport cannot preserve expansion characters, line breaks/NUL, or embedded quotes combined with CMD metacharacters. ${WINDOWS_SHIM_ARGV_REMEDY}`);
+	}
 }
 
 /** Exported for unit tests that lock Windows launcher argv ordering. */
@@ -162,11 +182,16 @@ export function buildAgentBrowserSpawnCommand(args: string[], platform: NodeJS.P
 	if (platform !== "win32") {
 		return { command: "agent-browser", args };
 	}
-	const invocationArgs = reorderWindowsLeadingGlobalArgs(args).map(quoteWindowsPowerShellArg).join(" ");
+	validateWindowsShimArgs(args);
+	const invocationArgs = reorderWindowsLeadingGlobalArgs(args).map(quoteWindowsCommandLineArg).join(" ");
 	const commandLine = [
 		"$agentBrowser = Get-Command agent-browser.cmd -ErrorAction SilentlyContinue;",
 		`if (-not $agentBrowser) { [Console]::Error.WriteLine('${WINDOWS_AGENT_BROWSER_MISSING_MARKER}'); exit 127 };`,
-		`& $agentBrowser.Source ${invocationArgs}`.trimEnd(),
+		`if ($agentBrowser.Source -match '[%!"\\r\\n&|<>^()]') { [Console]::Error.WriteLine('${WINDOWS_SHIM_ARGV_FAILURE_MARKER} Custom .cmd path cannot be represented literally. ${WINDOWS_SHIM_ARGV_REMEDY}'); exit 127 };`,
+		"$startInfo = New-Object System.Diagnostics.ProcessStartInfo;",
+		"$startInfo.FileName = $env:ComSpec; $startInfo.UseShellExecute = $false;",
+		`$startInfo.Arguments = '/d /v:off /s /c ""' + $agentBrowser.Source + ${quoteWindowsPowerShellArg(`" ${invocationArgs}"`)};`,
+		"$cli = [System.Diagnostics.Process]::Start($startInfo); $cli.WaitForExit(); $LASTEXITCODE = $cli.ExitCode; $cli.Dispose();",
 	].join(" ");
 	return { command: "powershell.exe", args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", protectWindowsShimInvocation(commandLine)] };
 }
@@ -576,6 +601,12 @@ export async function runAgentBrowserProcess(options: {
 	if (signal?.aborted) {
 		return { aborted: true, agentBrowserStarted: false, exitCode: 1, stderr: "", stdout: "", timedOut: false };
 	}
+	let spawnCommand: { command: string; args: string[] };
+	try {
+		spawnCommand = buildAgentBrowserSpawnCommand(prepareAgentBrowserSpawnArgs(args, ownedManagedSessionCompatibilityEnv.AGENT_BROWSER_USER_AGENT, preserveAttachedBrowserSession), processPlatform, nativeWindowsExecutable);
+	} catch (error) {
+		return { aborted: false, agentBrowserStarted: false, exitCode: 127, stderr: "", stdout: "", timedOut: false, spawnError: error instanceof Error ? error : new Error(String(error)) };
+	}
 	return await new Promise<ProcessRunResult>((resolve) => {
 		let aborted = false;
 		let agentBrowserStarted = false;
@@ -651,7 +682,7 @@ export async function runAgentBrowserProcess(options: {
 				if (stdoutSpillHandle) {
 					await stdoutSpillHandle.close().catch(() => undefined);
 				}
-				if (processPlatform === "win32" && stderr.includes(WINDOWS_SHIM_JOB_FAILURE_MARKER) && !spawnError) {
+				if (processPlatform === "win32" && (stderr.includes(WINDOWS_SHIM_JOB_FAILURE_MARKER) || stderr.includes(WINDOWS_SHIM_ARGV_FAILURE_MARKER)) && !spawnError) {
 					spawnError = new Error(stderr.trim());
 				}
 				const windowsMissingBinary = processPlatform === "win32" && exitCode !== 0 && isWindowsAgentBrowserCommandMissing(stderr);
@@ -686,7 +717,6 @@ export async function runAgentBrowserProcess(options: {
 			resolve({ aborted: false, agentBrowserStarted: false, exitCode: 1, spawnError: new Error(spawnPolicyError), stderr: "", stdout: "", timedOut: false });
 			return;
 		}
-		const spawnCommand = buildAgentBrowserSpawnCommand(prepareAgentBrowserSpawnArgs(args, ownedManagedSessionCompatibilityEnv.AGENT_BROWSER_USER_AGENT, preserveAttachedBrowserSession), processPlatform, nativeWindowsExecutable);
 		const child = spawn(spawnCommand.command, spawnCommand.args, {
 			cwd,
 			env: childEnv,
