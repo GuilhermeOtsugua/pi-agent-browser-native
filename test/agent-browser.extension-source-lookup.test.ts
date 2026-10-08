@@ -11,6 +11,7 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from 'node:url';
 
 import {
 	createExtensionHarness,
@@ -80,7 +81,7 @@ process.stdin.on("end", () => {
 			assert.equal(sourceLookup?.status, "candidates-found");
 			assert.ok(sourceLookup?.candidates?.some((candidate) => candidate.source === "react-inspect" && candidate.file === "src/Button.tsx" && candidate.line === 17 && candidate.confidence === "high"));
 			assert.ok(sourceLookup?.candidates?.some((candidate) => candidate.source === "dom-attribute" && candidate.file === "src/Button.tsx" && candidate.line === 17 && candidate.column === 5));
-			assert.ok(sourceLookup?.candidates?.some((candidate) => candidate.source === "workspace-search" && candidate.componentName === "Panel" && candidate.file?.endsWith("src/Panel.tsx")));
+			assert.ok(sourceLookup?.candidates?.some((candidate) => candidate.source === "workspace-search" && candidate.componentName === "Panel" && candidate.file?.endsWith(join('src', 'Panel.tsx'))));
 			const invocations = await readInvocationLog(logPath);
 			assert.deepEqual(invocations[0]?.args.slice(-1), ["batch"]);
 		});
@@ -200,7 +201,7 @@ test("agentBrowserExtension allows sourceLookup after local-file URL verificatio
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-source-lookup-file-"));
 	const logPath = join(tempDir, "invocations.log");
 	const basePath = process.env.PATH ?? "";
-	const fileUrl = `file://${join(tempDir, "plain.html")}`;
+	const fileUrl = pathToFileURL(join(tempDir, 'plain.html')).href;
 	await writeFakeAgentBrowserBinary(tempDir, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 let stdin = "";
@@ -320,8 +321,8 @@ process.stdin.on("end", () => {
 			assert.doesNotMatch(JSON.stringify(lookup), /secret|user:pass|ok=1/);
 			assert.doesNotMatch(JSON.stringify(result), /secret|user:pass|ok=1/);
 			assert.ok(lookup?.candidates?.some((candidate) => candidate.source === "initiator" && candidate.file === "src/api.ts" && candidate.line === 1));
-			assert.ok(lookup?.candidates?.some((candidate) => candidate.source === "workspace-search" && candidate.file?.endsWith("src/api.ts") && candidate.line === 1));
-			assert.equal(lookup?.candidates?.some((candidate) => candidate.file === "src/ok.ts" || candidate.file?.endsWith("src/ok.ts")), false);
+			assert.ok(lookup?.candidates?.some((candidate) => candidate.source === "workspace-search" && candidate.file?.endsWith(join('src', 'api.ts')) && candidate.line === 1));
+			assert.equal(lookup?.candidates?.some((candidate) => candidate.file === "src/ok.ts" || candidate.file?.endsWith(join('src', 'ok.ts'))), false);
 
 			const requestOnlyResult = await executeRegisteredTool(harness.tool, harness.ctx, {
 				networkSourceLookup: { requestId: "req-1" },

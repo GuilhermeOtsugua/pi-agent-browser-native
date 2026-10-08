@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { parseUserBatchStdin } from "../extensions/agent-browser/lib/orchestration/batch-stdin.js";
@@ -49,12 +49,12 @@ test("buildToolPresentation formats download results as saved-file summaries", a
 	assert.match((presentation.content[0] as { text: string }).text, /Download reported; file not verified: \/tmp\/report\.pdf/);
 	assert.match((presentation.content[0] as { text: string }).text, /application\/pdf/);
 	assert.match((presentation.content[0] as { text: string }).text, /not found on disk/);
-	assert.equal(presentation.summary, "Artifact verification failed: requested download was not found at /tmp/report.pdf.");
+	assert.equal(presentation.summary, `Artifact verification failed: requested download was not found at ${resolve('/tmp/report.pdf')}.`);
 	assert.equal(presentation.resultCategory, "failure");
 	assert.equal(presentation.failureCategory, "artifact-missing");
 	assert.equal(presentation.artifacts?.[0]?.kind, "download");
 	assert.equal(presentation.artifacts?.[0]?.path, "/tmp/report.pdf");
-	assert.equal(presentation.artifacts?.[0]?.absolutePath, "/tmp/report.pdf");
+	assert.equal(presentation.artifacts?.[0]?.absolutePath, resolve('/tmp/report.pdf'));
 	assert.equal(presentation.artifacts?.[0]?.mediaType, "application/pdf");
 	assert.equal(presentation.artifacts?.[0]?.exists, false);
 	assert.equal(presentation.savedFilePath, "/tmp/report.pdf");
@@ -167,19 +167,19 @@ test("buildToolPresentation renders metadata-first summaries for file artifact c
 
 		assert.equal(presentation.content[0]?.type, "text");
 		assert.match((presentation.content[0] as { text: string }).text, new RegExp(item.expectedText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-		assert.equal(presentation.summary, `Artifact verification failed: requested ${item.expectedKind} was not found at ${join("/tmp/pi-agent-browser-artifact-tests", item.data.path)}.`);
+		assert.equal(presentation.summary, `Artifact verification failed: requested ${item.expectedKind} was not found at ${resolve("/tmp/pi-agent-browser-artifact-tests", item.data.path)}.`);
 		assert.equal(presentation.resultCategory, "failure");
 		assert.equal(presentation.failureCategory, "artifact-missing");
 		assert.equal(presentation.artifacts?.length, 1);
 		assert.equal(presentation.artifacts?.[0]?.kind, item.expectedKind);
 		assert.equal(presentation.artifacts?.[0]?.path, item.data.path);
-		assert.equal(presentation.artifacts?.[0]?.absolutePath, join("/tmp/pi-agent-browser-artifact-tests", item.data.path));
+		assert.equal(presentation.artifacts?.[0]?.absolutePath, resolve("/tmp/pi-agent-browser-artifact-tests", item.data.path));
 		assert.equal(presentation.artifacts?.[0]?.mediaType, item.expectedMediaType);
 		assert.equal(presentation.artifacts?.[0]?.exists, false);
 		assert.equal(presentation.artifactVerification?.missingCount, 1);
 		assert.equal(presentation.artifactVerification?.verified, false);
 		assert.equal(presentation.artifactVerification?.artifacts[0]?.state, "missing");
-		assert.equal(presentation.artifactVerification?.artifacts[0]?.absolutePath, join("/tmp/pi-agent-browser-artifact-tests", item.data.path));
+		assert.equal(presentation.artifactVerification?.artifacts[0]?.absolutePath, resolve("/tmp/pi-agent-browser-artifact-tests", item.data.path));
 		assert.equal(presentation.imagePath, undefined);
 		assert.equal(presentation.imagePaths, undefined);
 		if (item.commandInfo.command === "pdf") {
@@ -219,7 +219,7 @@ test("buildToolPresentation records path-bearing diff screenshots without inlini
 		envelope: { success: true, data: { baselinePath: "baseline.png", diffPath: "diff.png", mismatchPixels: 12 } },
 	});
 
-	assert.equal(presentation.summary, "Artifact verification failed: requested image was not found at /tmp/pi-agent-browser-artifact-tests/diff.png.");
+	assert.equal(presentation.summary, `Artifact verification failed: requested image was not found at ${resolve('/tmp/pi-agent-browser-artifact-tests/diff.png')}.`);
 	assert.equal(presentation.resultCategory, "failure");
 	assert.equal(presentation.failureCategory, "artifact-missing");
 	assert.equal(presentation.content[0]?.type, "text");
@@ -231,7 +231,7 @@ test("buildToolPresentation records path-bearing diff screenshots without inlini
 	assert.equal(presentation.artifacts?.length, 1);
 	assert.equal(presentation.artifacts?.[0]?.kind, "image");
 	assert.equal(presentation.artifacts?.[0]?.path, "diff.png");
-	assert.equal(presentation.artifacts?.[0]?.absolutePath, join("/tmp/pi-agent-browser-artifact-tests", "diff.png"));
+	assert.equal(presentation.artifacts?.[0]?.absolutePath, resolve("/tmp/pi-agent-browser-artifact-tests", "diff.png"));
 	assert.equal(presentation.artifactVerification?.artifacts[0]?.state, "missing");
 	assert.equal(presentation.artifactVerification?.artifacts[0]?.path, "diff.png");
 	assert.equal(presentation.imagePath, undefined);
@@ -256,7 +256,7 @@ test("buildToolPresentation renders record start as a lifecycle state without mi
 	assert.equal(presentation.artifacts?.length, 1);
 	assert.equal(presentation.artifacts?.[0]?.kind, "video");
 	assert.equal(presentation.artifacts?.[0]?.path, "recording.webm");
-	assert.equal(presentation.artifacts?.[0]?.absolutePath, join("/tmp/pi-agent-browser-artifact-tests", "recording.webm"));
+	assert.equal(presentation.artifacts?.[0]?.absolutePath, resolve("/tmp/pi-agent-browser-artifact-tests", "recording.webm"));
 	assert.equal(presentation.artifacts?.[0]?.mediaType, "video/webm");
 	assert.equal(presentation.artifacts?.[0]?.exists, undefined);
 	assert.equal(presentation.artifacts?.[0]?.status, "pending");
@@ -914,7 +914,7 @@ test("buildToolPresentation preserves wait --download saved-file metadata inside
 		path: "/tmp/export.csv",
 		subcommand: "--download",
 	});
-	assert.equal(presentation.summary, "Artifact verification failed: requested download was not found at /tmp/export.csv.");
+	assert.equal(presentation.summary, `Artifact verification failed: requested download was not found at ${resolve('/tmp/export.csv')}.`);
 	assert.equal(presentation.batchFailure?.successCount, 1);
 	assert.equal(presentation.batchFailure?.totalCount, 2);
 	assert.equal(presentation.batchSteps?.[1]?.artifactVerification?.missingCount, 1);

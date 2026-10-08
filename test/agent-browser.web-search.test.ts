@@ -277,7 +277,7 @@ test("registers command-sourced config without executing command until search ex
 	const fixture = await createFixture();
 	await writeJson(fixture.overrideConfigPath, {
 		version: 1,
-		webSearch: { braveApiKey: `!${process.execPath} -e "process.stdout.write('runtime-secret')"` },
+		webSearch: { braveApiKey: `!"${process.execPath}" -e "process.stdout.write('runtime-secret')"` },
 	});
 	await withPatchedEnv({ HOME: fixture.home, [AGENT_BROWSER_CONFIG_ENV]: fixture.overrideConfigPath, [BRAVE_API_KEY_ENV]: undefined, [EXA_API_KEY_ENV]: undefined }, async () => {
 		const harness = createExtensionHarness({ cwd: fixture.cwd });

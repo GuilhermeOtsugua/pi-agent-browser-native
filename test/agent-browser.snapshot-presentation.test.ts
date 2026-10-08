@@ -64,7 +64,7 @@ test("buildToolPresentation reuses compact snapshot rendering inside batch outpu
 	}
 });
 
-test("buildToolPresentation compacts oversized snapshots and spills a redacted snapshot to a private temp file", async () => {
+test("buildToolPresentation compacts oversized snapshots and spills a redacted snapshot to a private temp file", async (t) => {
 	const refs = Object.fromEntries(
 		Array.from({ length: 90 }, (_, index) => [
 			`e${index + 1}`,
@@ -109,12 +109,14 @@ test("buildToolPresentation compacts oversized snapshots and spills a redacted s
 	assert.match(spillText, /Actionable control 1/);
 	assert.match(spillText, /SAMLRequest=%5BREDACTED%5D&RelayState=%5BREDACTED%5D/);
 	assert.doesNotMatch(spillText, /saml-secret|relay-secret/);
-	assert.equal(spillStats.mode & 0o777, 0o600);
-	assert.equal(spillDirStats.mode & 0o777, 0o700);
+	await t.test('POSIX spill permission bits', {skip: process.platform === 'win32' ? 'POSIX mode bits do not establish NTFS ACL privacy' : false}, () => {
+		assert.equal(spillStats.mode & 0o777, 0o600);
+		assert.equal(spillDirStats.mode & 0o777, 0o700);
+	});
 	await rm(spillPath, { force: true });
 });
 
-test("buildToolPresentation keeps compact snapshot spill files in the persisted session artifact directory when available", { concurrency: false }, async () => {
+test("buildToolPresentation keeps compact snapshot spill files in the persisted session artifact directory when available", { concurrency: false }, async (t) => {
 	await cleanupSecureTempArtifacts();
 	const sessionDir = await mkdtemp(join(tmpdir(), "pi-session-store-"));
 	const refs = Object.fromEntries(
@@ -145,8 +147,10 @@ test("buildToolPresentation keeps compact snapshot spill files in the persisted 
 		assert.equal(spillPath?.startsWith(join(sessionDir, ".pi-agent-browser-artifacts", TEST_SESSION_ID)), true);
 		await cleanupSecureTempArtifacts();
 		assert.match(await readFile(String(spillPath), "utf8"), /Persisted snapshot row 120/);
-		assert.equal((await stat(String(spillPath))).mode & 0o777, 0o600);
-		assert.equal((await stat(dirname(String(spillPath)))).mode & 0o777, 0o700);
+		await t.test('POSIX persistent spill permission bits', {skip: process.platform === 'win32' ? 'POSIX mode bits do not establish NTFS ACL privacy' : false}, async () => {
+			assert.equal((await stat(String(spillPath))).mode & 0o777, 0o600);
+			assert.equal((await stat(dirname(String(spillPath)))).mode & 0o777, 0o700);
+		});
 	} finally {
 		await cleanupSecureTempArtifacts();
 		await rm(sessionDir, { force: true, recursive: true });
