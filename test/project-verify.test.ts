@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { delimiter } from "node:path";
 import test from "node:test";
 
@@ -19,9 +20,22 @@ const projectModule = (await import("../scripts/project.mjs")) as {
 };
 const { docsSteps, hostToolPath, parseVerifyArgs, verifySteps } = projectModule;
 
+const require = createRequire(import.meta.url);
+const toolEntries = [require.resolve('typescript/bin/tsc'), require.resolve('tsx/cli')];
+
 function labels(steps: Array<{ args: string[]; env?: Record<string, string> }>): string[] {
-	return steps.map((step) => step.args.join(" "));
+	return steps.map((step) => (toolEntries.includes(step.args[0] ?? '')
+		? step.args.slice(1) : step.args).join(" "));
 }
+
+test('verification tools use Node with local JS entrypoints, never Windows shell shims', () => {
+	const compiler = verifySteps({ mode: 'typecheck', passthrough: [], showHelp: false })[0];
+	const playbook = docsSteps({ mode: 'check', target: 'playbook' })[0];
+	assert.equal(compiler?.command, process.execPath);
+	assert.equal(playbook?.command, process.execPath);
+	assert.deepEqual(compiler?.args, [toolEntries[0], '--noEmit']);
+	assert.deepEqual(playbook?.args, [toolEntries[1], './scripts/check-playbook-drift.ts', '--check']);
+});
 
 test("package lock excludes WorkOS URLs", () => {
 	assert.doesNotMatch(readFileSync("package-lock.json", "utf8"), /(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s\"]*(?:workos|socket-firewall)/i);

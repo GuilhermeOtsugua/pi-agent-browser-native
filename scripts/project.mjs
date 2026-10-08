@@ -4,17 +4,19 @@
  * Responsibilities: Dispatch consolidated `npm run docs -- ...` and `npm run verify -- ...` commands to the underlying focused scripts, preserve exit codes, and print discoverable help. Default/pre-pr/release/docs verify step wiring is regression-locked in `test/project-verify.test.ts`.
  * Scope: Local maintainer orchestration only; individual verifier scripts continue to own their domain-specific checks.
  * Usage: Called from package.json scripts (`npm run docs`, `npm run verify -- package-pi`) or directly as `node scripts/project.mjs <docs|verify> ...`.
- * Invariants/Assumptions: `npm install` has populated local `node_modules/.bin` tools, and Pi/tmux are available in the maintainer environment only for lifecycle/package smoke modes.
+ * Invariants/Assumptions: `npm install` has populated local JavaScript tool entrypoints, and Pi/tmux are available in the maintainer environment only for lifecycle/package smoke modes.
  * Related: `docs/SUPPORT_MATRIX.md` maps `npm run verify` / `npm run docs` modes to the release-readiness gates maintainers re-run before shipping.
  */
 
 import { spawn } from "node:child_process";
-import { delimiter, join } from "node:path";
+import { createRequire } from "node:module";
+import { delimiter } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 const nodeCommand = process.execPath;
-const binSuffix = process.platform === "win32" ? ".cmd" : "";
+const require = createRequire(import.meta.url);
+const localTools = { tsc: 'typescript/bin/tsc', tsx: 'tsx/cli' };
 
 class UsageError extends Error {
 	constructor(message) {
@@ -126,17 +128,12 @@ function commandLabel(command, args) {
 	return [command, ...args].join(" ");
 }
 
-function shouldUseShell(command) {
-	return process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command);
-}
-
 function run(command, args, options = {}) {
 	return new Promise((resolve, reject) => {
 		console.log(`\n> ${commandLabel(command, args)}`);
 		const child = spawn(command, args, {
 			cwd: process.cwd(),
 			env: { ...process.env, ...options.env },
-			shell: shouldUseShell(command),
 			stdio: "inherit",
 		});
 		child.on("error", reject);
@@ -172,7 +169,7 @@ export function hostToolPath(pathValue = process.env.PATH ?? "") {
 }
 
 function localToolStep(command, args, env) {
-	return { command: join(process.cwd(), "node_modules", ".bin", `${command}${binSuffix}`), args, env };
+	return scriptStep([require.resolve(localTools[command]), ...args], env);
 }
 
 export function parseDocsArgs(argv) {

@@ -8,21 +8,20 @@
  */
 
 import { execFile as execFileCallback } from "node:child_process";
+import { createRequire } from "node:module";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import process from "node:process";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
-const binSuffix = process.platform === "win32" ? ".cmd" : "";
-const tscPath = join(process.cwd(), "node_modules", ".bin", `tsc${binSuffix}`);
+const require = createRequire(import.meta.url);
+const tscPath = require.resolve('typescript/bin/tsc');
 
 async function main() {
 	await rm(join(process.cwd(), "dist"), { force: true, maxRetries: 5, recursive: true, retryDelay: 100 });
-	const options = process.platform === "win32" ? { shell: true } : {};
 	try {
-		const { stderr, stdout } = await execFile(tscPath, ["-p", "tsconfig.build.json"], {
-			...options,
+		const { stderr, stdout } = await execFile(process.execPath, [tscPath, "-p", "tsconfig.build.json"], {
 			cwd: process.cwd(),
 			maxBuffer: 10 * 1024 * 1024,
 		});

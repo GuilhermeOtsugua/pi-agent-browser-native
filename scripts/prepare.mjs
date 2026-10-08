@@ -34,17 +34,19 @@ function canResolveBuildDependencies() {
 
 async function runNpmInstallDevDependencies() {
 	const npmExecPath = process.env.npm_execpath;
-	const options = process.platform === "win32" ? { shell: true } : {};
 	if (npmExecPath) {
 		await execFile(process.execPath, [npmExecPath, "install", "--include=dev", "--ignore-scripts"], {
-			...options,
 			cwd: process.cwd(),
 			maxBuffer: 20 * 1024 * 1024,
 		});
 		return;
 	}
-	await execFile("npm", ["install", "--include=dev", "--ignore-scripts"], {
-		...options,
+	// The manual Windows fallback has a fixed command, not shell-expanded caller argv.
+	const command = process.platform === 'win32' ? 'cmd.exe' : 'npm';
+	const args = process.platform === 'win32'
+		? ['/d', '/s', '/c', 'npm install --include=dev --ignore-scripts']
+		: ['install', '--include=dev', '--ignore-scripts'];
+	await execFile(command, args, {
 		cwd: process.cwd(),
 		maxBuffer: 20 * 1024 * 1024,
 	});
