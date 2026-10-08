@@ -1,5 +1,7 @@
 # Windows lifecycle and restore hardening
 
+Historical bounded pass. See [current contracts and remaining gaps](REMAINING_GAPS.md) for corrected process/restore/config fixtures and the subsequently reproduced short-watchdog cancellation race. The tree-ordering repair below is not complete cancellation certification.
+
 Validated 8 October 2026 with Node 24.0.2 on native Windows. This is a bounded repair pass, not a release-gate or all-platform certification.
 
 ## Runtime fixes
