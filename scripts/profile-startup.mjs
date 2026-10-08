@@ -13,6 +13,7 @@ import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { isDirectRun } from './lib/direct-run.mjs';
 
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -203,7 +204,7 @@ async function main(argv = process.argv.slice(2)) {
 	return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectRun(import.meta.url)) {
 	main().then(
 		(code) => {
 			process.exitCode = code;

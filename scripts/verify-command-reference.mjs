@@ -11,6 +11,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { isDirectRun } from './lib/direct-run.mjs';
 
 import {
   CAPABILITY_BASELINE,
@@ -140,7 +141,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectRun(import.meta.url)) {
   main().then((exitCode) => {
     process.exitCode = exitCode;
   });

@@ -8,6 +8,7 @@
  */
 
 import { readFile, writeFile } from "node:fs/promises";
+import { isDirectRun } from './lib/direct-run.mjs';
 
 import {
   CAPABILITY_BASELINE,
@@ -126,9 +127,10 @@ function replaceBlock(content, id, path) {
   const afterEndIndex = endIndex + end.length;
   const current = content.slice(startIndex, afterEndIndex);
   const expected = markedCommandReferenceBaselineBlock(id);
+  const replacement = current.includes('\r\n') ? expected.replaceAll('\n', '\r\n') : expected;
   return {
-    next: `${content.slice(0, startIndex)}${expected}${content.slice(afterEndIndex)}`,
-    drifted: current !== expected,
+    next: `${content.slice(0, startIndex)}${replacement}${content.slice(afterEndIndex)}`,
+    drifted: current.replaceAll('\r\n', '\n') !== expected,
   };
 }
 
@@ -167,7 +169,7 @@ export async function main(argv = process.argv.slice(2)) {
   );
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectRun(import.meta.url)) {
   main().then(
     (exitCode) => {
       process.exitCode = exitCode;
