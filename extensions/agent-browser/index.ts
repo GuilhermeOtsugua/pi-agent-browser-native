@@ -488,8 +488,11 @@ function syncOwnedManagedSessionsFromResult(sessions: Map<string, OwnedManagedSe
 	const currentSessionName = typeof outcome.currentSessionName === "string" ? outcome.currentSessionName : undefined;
 	const attemptedSessionName = typeof outcome.attemptedSessionName === "string" ? outcome.attemptedSessionName : undefined;
 	const namespace = isRecord(details) && typeof details.namespace === "string" ? details.namespace : undefined;
-	if (outcome.activeAfter === true && (status === "created" || status === "replaced" || status === "unchanged")) {
-		trackOwnedManagedSession(sessions, currentSessionName, cwd, {
+	// A failed browser launch can still leave our generated session's daemon alive.
+	// Retain shutdown ownership without claiming an active page or closing it before readback.
+	const abandonedOwnedLaunch = status === "abandoned" && details?.usedImplicitSession === true && details.agentBrowserStarted === true;
+	if (abandonedOwnedLaunch || (outcome.activeAfter === true && (status === "created" || status === "replaced" || status === "unchanged"))) {
+		trackOwnedManagedSession(sessions, abandonedOwnedLaunch ? attemptedSessionName : currentSessionName, cwd, {
 			compatibilityWorkaround: getRecognizedCompatibilityWorkaround(details?.compatibilityWorkaround),
 			headedManagedAutosaveDisabled: details?.managedSessionHeadedAutosaveDisabled === true,
 			headedManagedAutosaveInterval: typeof details?.managedSessionHeadedAutosaveInterval === "string" ? details.managedSessionHeadedAutosaveInterval : undefined,
