@@ -16,6 +16,10 @@ import {
 	getManagedSessionPolicyLockPath,
 } from "../extensions/agent-browser/lib/managed-session-policy-lock.js";
 
+// Windows foreign-PID identity checks launch PowerShell for every observation (no
+// cached foreign identities). Four independent tsx processes plus repeated checks
+// are fixture workload, not the production 1s coordination policy.
+const coordinationTimeoutMs = process.platform === "win32" ? 10_000 : 1_000;
 const sessionName = `piab-policy-lock-${process.pid}`;
 const lockBasePath = getManagedSessionPolicyLockPath(sessionName);
 const claimPrefix = `${basename(lockBasePath)}.claim-`;
@@ -50,6 +54,11 @@ test("managed session policy lock waits asynchronously and releases only its imm
 	setTimeout(() => { timerRan = true; }, 5);
 	assert.equal(await waiting, undefined);
 	assert.equal(timerRan, true);
+	const controller = new AbortController();
+	const cancelled = acquireManagedSessionPolicyLock({ sessionName, timeoutMs: coordinationTimeoutMs, signal: controller.signal });
+	controller.abort();
+	assert.equal(await cancelled, undefined);
+	assert.equal((await claimPaths()).length, 1);
 
 	const claimPath = await onlyClaimPath();
 	const ownerPath = join(claimPath, "owner.json");
@@ -75,7 +84,7 @@ test("managed session policy lock cleans dead removal artifacts", async () => {
 	await lock.release();
 });
 
-test("managed session policy lock fails closed without repairing unsafe owner permissions", async () => {
+test("managed session policy lock fails closed without repairing unsafe owner permissions", { skip: process.platform === "win32" ? "POSIX mode bits are not enforced by Windows chmod" : false }, async () => {
 	const first = await acquireManagedSessionPolicyLock({ sessionName });
 	assert.ok(first);
 	const claimPath = await onlyClaimPath();
@@ -87,19 +96,34 @@ test("managed session policy lock fails closed without repairing unsafe owner pe
 	await stat(claimPath);
 });
 
+test("managed session policy lock fails closed on malformed owners on every platform", async () => {
+	const first = await acquireManagedSessionPolicyLock({ sessionName });
+	assert.ok(first);
+	const claimPath = await onlyClaimPath();
+	const ownerPath = join(claimPath, "owner.json");
+	await writeFile(ownerPath, "{invalid");
+	assert.equal(await acquireManagedSessionPolicyLock({ sessionName, timeoutMs: 25 }), undefined);
+	await first.release();
+	assert.equal(await readFile(ownerPath, "utf8"), "{invalid");
+});
+
 test("managed session policy lock serializes concurrent contenders", async () => {
 	let active = 0;
 	let maxActive = 0;
-	await Promise.all(Array.from({ length: 8 }, async () => {
+	const outcomes = await Promise.all(Array.from({ length: 8 }, async () => {
+		const started = Date.now();
 		const lock = await acquireManagedSessionPolicyLock({ sessionName, timeoutMs: 1_000 });
-		assert.ok(lock);
+		if (!lock) return { acquired: false, elapsedMs: Date.now() - started };
 		active += 1;
 		maxActive = Math.max(maxActive, active);
 		await new Promise((resolve) => setTimeout(resolve, 5));
 		active -= 1;
 		await lock.release();
+		return { acquired: true, elapsedMs: Date.now() - started };
 	}));
+	assert.equal(outcomes.every((outcome) => outcome.acquired), true, JSON.stringify({ outcomes, remainingClaims: await Promise.all((await claimPaths()).map(async (path) => ({ path, owner: await readFile(join(path, "owner.json"), "utf8").catch(String), ticket: await readFile(join(path, "ticket.json"), "utf8").catch(String) }))) }));
 	assert.equal(maxActive, 1);
+	assert.deepEqual(await claimPaths(), []);
 });
 
 test("managed session policy lock excludes a live owner in another process", async () => {
@@ -117,7 +141,7 @@ test("managed session policy lock excludes a live owner in another process", asy
 	await recovered.release();
 });
 
-test("competing cross-process reclaimers stay serialized after a stale claim", async () => {
+test("competing cross-process reclaimers stay serialized after a stale claim", async (t) => {
 	const moduleUrl = new URL("../extensions/agent-browser/lib/managed-session-policy-lock.ts", import.meta.url).href;
 	const staleScript = `import { acquireManagedSessionPolicyLock } from ${JSON.stringify(moduleUrl)}; const lock = await acquireManagedSessionPolicyLock({ sessionName: ${JSON.stringify(sessionName)} }); if (!lock) process.exit(2);`;
 	const stale = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", staleScript], { stdio: "ignore" });
@@ -126,17 +150,25 @@ test("competing cross-process reclaimers stay serialized after a stale claim", a
 	await onlyClaimPath();
 
 	const logPath = join(dirname(lockBasePath), `${basename(lockBasePath)}.critical.log`);
-	const contenderScript = `import fs from "node:fs"; import { acquireManagedSessionPolicyLock } from ${JSON.stringify(moduleUrl)}; const lock = await acquireManagedSessionPolicyLock({ sessionName: ${JSON.stringify(sessionName)}, timeoutMs: 1000 }); if (!lock) process.exit(2); fs.appendFileSync(${JSON.stringify(logPath)}, "start:" + process.pid + "\\n"); await new Promise((resolve) => setTimeout(resolve, 25)); fs.appendFileSync(${JSON.stringify(logPath)}, "end:" + process.pid + "\\n"); await lock.release();`;
+	const contenderScript = `import fs from "node:fs"; import { acquireManagedSessionPolicyLock } from ${JSON.stringify(moduleUrl)}; const started = Date.now(); const lock = await acquireManagedSessionPolicyLock({ sessionName: ${JSON.stringify(sessionName)}, timeoutMs: ${coordinationTimeoutMs} }); process.stdout.write(JSON.stringify({ acquired: !!lock, elapsedMs: Date.now() - started, execPath: process.execPath, execArgv: process.execArgv, moduleUrl: ${JSON.stringify(moduleUrl)} }) + "\\n"); if (!lock) process.exit(2); fs.appendFileSync(${JSON.stringify(logPath)}, "start:" + process.pid + "\\n"); await new Promise((resolve) => setTimeout(resolve, 25)); fs.appendFileSync(${JSON.stringify(logPath)}, "end:" + process.pid + "\\n"); await lock.release();`;
 	try {
 		const contenders = Array.from({ length: 4 }, () => {
-			const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", contenderScript], { stdio: ["ignore", "ignore", "pipe"] });
+			const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", contenderScript], { stdio: ["ignore", "pipe", "pipe"] });
 			let stderr = "";
+			let stdout = "";
 			child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
-			return { child, exit: once(child, "exit"), getStderr: () => stderr };
+			child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+			return { child, exit: once(child, "exit"), getStderr: () => stderr, getStdout: () => stdout };
 		});
 		for (const contender of contenders) {
 			const [code] = await contender.exit as [number | null];
-			assert.equal(code, 0, contender.getStderr());
+			assert.equal(code, 0, contender.getStderr() + contender.getStdout());
+			const evidence = JSON.parse(contender.getStdout());
+			assert.equal(evidence.acquired, true);
+			assert.equal(evidence.execPath, process.execPath);
+			assert.equal(evidence.moduleUrl, moduleUrl);
+			assert.deepEqual(evidence.execArgv.slice(0, 5), ["--import", "tsx", "--input-type=module", "--eval", contenderScript]);
+			t.diagnostic(`reclaimer coordination: ${evidence.elapsedMs}ms; Node ${evidence.execPath}; tsx file URL ${moduleUrl}`);
 		}
 		const lines = (await readFile(logPath, "utf8")).trim().split("\n");
 		let active = 0;

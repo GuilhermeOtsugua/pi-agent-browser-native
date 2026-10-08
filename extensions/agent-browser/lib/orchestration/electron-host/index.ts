@@ -555,8 +555,16 @@ async function runElectronProbeCommandData(options: {
 	stdin?: string;
 	timeoutMs?: number;
 }): Promise<{ data?: unknown; error?: string }> {
+	// A native launcher can finish successfully while timeout termination is in flight.
+	// Keep this helper's requested deadline authoritative, independently of exit code.
+	const deadlineSignal = options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs);
+	const signal = deadlineSignal
+		? options.signal ? AbortSignal.any([options.signal, deadlineSignal]) : deadlineSignal
+		: options.signal;
 	try {
-		return { data: await runSessionCommandData({ ...options, pinNamespace: true, throwOnFailure: true }) };
+		const data = await runSessionCommandData({ ...options, signal, pinNamespace: true, throwOnFailure: true });
+		if (signal?.aborted) throw new Error(deadlineSignal?.aborted ? "Electron probe command timed out" : "Electron probe command was aborted");
+		return { data };
 	} catch (error) {
 		return { error: error instanceof Error ? error.message : String(error) };
 	}

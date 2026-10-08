@@ -937,6 +937,21 @@ setTimeout(() => {
 			assert.equal(probeResult.details?.failureCategory, "upstream-error");
 			assert.equal((probeResult.details?.electron as { status?: string } | undefined)?.status, "failed");
 			assert.match(probeResult.content[0]?.text ?? "", /Electron probe failed/);
+			assert.equal(probeResult.details?.refSnapshot, undefined);
+
+			const controller = new AbortController();
+			const cancellation = setTimeout(() => controller.abort(), 25);
+			try {
+				const cancelled = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "probe", timeoutMs: 10_000 } }, controller.signal);
+				assert.equal(cancelled.isError, true, JSON.stringify(cancelled));
+				assert.equal(cancelled.details?.refSnapshot, undefined);
+			} finally {
+				clearTimeout(cancellation);
+			}
+			// Neither a read-only timeout nor caller cancellation retires the attachment.
+			const recovered = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "probe", timeoutMs: 10_000 } });
+			assert.equal(recovered.isError, false, JSON.stringify(recovered));
+			assert.equal(recovered.details?.sessionName, connectedSessionName);
 		});
 	} finally {
 		await disposeElectronScriptFixtures();
