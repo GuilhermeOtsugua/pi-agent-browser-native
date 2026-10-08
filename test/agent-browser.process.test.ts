@@ -39,6 +39,7 @@ import {
 	shouldCommitManagedRestoreAfterWindowsProcess,
 	runAgentBrowserProcess,
 } from "../extensions/agent-browser/lib/process.js";
+import { protectWindowsShimInvocation } from "../extensions/agent-browser/lib/windows-shim-job.js";
 import { parseAgentBrowserEnvelope } from "../extensions/agent-browser/lib/results/envelope.js";
 import {
 	cleanupSecureTempArtifacts,
@@ -228,12 +229,12 @@ test("buildAgentBrowserSpawnCommand uses the npm cmd shim on Windows", () => {
 		buildAgentBrowserSpawnCommand(["--json", "--session", "managed", "open", "https://example.com"], "win32"),
 		{
 			command: "powershell.exe",
-			args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "$agentBrowser = Get-Command agent-browser.cmd -ErrorAction SilentlyContinue; if (-not $agentBrowser) { [Console]::Error.WriteLine('PI_AGENT_BROWSER_COMMAND_NOT_FOUND:agent-browser.cmd'); exit 127 }; & $agentBrowser.Source 'open' '--json' '--session' 'managed' 'https://example.com'"],
+			args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", protectWindowsShimInvocation("$agentBrowser = Get-Command agent-browser.cmd -ErrorAction SilentlyContinue; if (-not $agentBrowser) { [Console]::Error.WriteLine('PI_AGENT_BROWSER_COMMAND_NOT_FOUND:agent-browser.cmd'); exit 127 }; & $agentBrowser.Source 'open' '--json' '--session' 'managed' 'https://example.com'")],
 		},
 	);
 	assert.match(
 		buildAgentBrowserSpawnCommand(["--json", "--session", "managed", "webmcp", "invoke", "search", "--params", `{"query":"Mitch's browser"}`], "win32").args.at(-1) ?? "",
-		/& \$agentBrowser\.Source 'webmcp' 'invoke' '--json' '--session' 'managed' 'search' '--params' '\{"query":"Mitch''s browser"\}'$/,
+		/& \$agentBrowser\.Source 'webmcp' 'invoke' '--json' '--session' 'managed' 'search' '--params' '\{"query":"Mitch''s browser"\}';/,
 	);
 	assert.deepEqual(buildAgentBrowserSpawnCommand(["--version"], "darwin"), { command: "agent-browser", args: ["--version"] });
 });
@@ -485,8 +486,9 @@ test("runAgentBrowserProcess stops a hung upstream client at the wrapper watchdo
 		assert.equal(processResult.timedOut, true);
 		assert.equal(processResult.timeoutMs, 100);
 		assert.equal(processResult.aborted, false);
-		// taskkill reports a numeric close code on Windows, which outranks timeout.
-		assert.equal(processResult.exitCode, process.platform === "win32" ? 1 : 124);
+		// Signal termination has no numeric close code; the unchanged resolver
+		// therefore uses its timeout fallback on the protected shim too.
+		assert.equal(processResult.exitCode, 124);
 		assert.ok(Date.now() - startedAt < 2_000);
 	} finally {
 		await rm(tempDir, { force: true, maxRetries: 5, recursive: true, retryDelay: 100 });
@@ -587,7 +589,7 @@ test("runAgentBrowserProcess resolves after exit when descendants keep stdio han
 	}
 });
 
-test("runAgentBrowserProcess respects close-code precedence on timeout with inherited stdio",  async () => {
+test("runAgentBrowserProcess respects null-close timeout fallback with inherited stdio",  async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-stdio-timeout-"));
 	const basePath = process.env.PATH ?? "";
 	const lingerPidPath = join(tempDir, "linger.pid");
@@ -616,8 +618,10 @@ test("runAgentBrowserProcess respects close-code precedence on timeout with inhe
 		lingerPid = Number((await readFile(lingerPidPath, "utf8")).trim());
 		assert.equal(processResult.timedOut, true);
 		assert.equal(processResult.timeoutMs, timeoutMs);
-		// A taskkill-observed close code wins over the wrapper timeout fallback.
-		assert.equal(processResult.exitCode, process.platform === "win32" ? 1 : 124);
+		// Null close after signal termination reaches the timeout fallback.
+		// Numeric close precedence is independently locked by the resolver test.
+		assert.equal(processResult.exitCode, 124);
+		if (process.platform === "win32") assert.throws(() => process.kill(lingerPid!, 0), { code: "ESRCH" });
 		assert.equal(processResult.spawnError, undefined);
 		assert.ok(
 			elapsedMs < timeoutMs + 2_000,

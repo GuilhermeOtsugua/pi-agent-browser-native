@@ -32,6 +32,7 @@ import { getImplicitSessionIdleTimeoutMs } from "./runtime.js";
 import { getAgentBrowserProcessEnvironment } from "./process-environment.js";
 import { openSecureTempFile, writeSecureTempChunk } from "./temp.js";
 import { resolveWindowsNativeLauncher } from "./windows-native-launcher.js";
+import { protectWindowsShimInvocation, WINDOWS_SHIM_JOB_FAILURE_MARKER } from "./windows-shim-job.js";
 
 const MAX_BUFFERED_STDOUT_BYTES = 512 * 1_024;
 const MAX_BUFFERED_STDERR_CHARS = 32_000;
@@ -167,7 +168,7 @@ export function buildAgentBrowserSpawnCommand(args: string[], platform: NodeJS.P
 		`if (-not $agentBrowser) { [Console]::Error.WriteLine('${WINDOWS_AGENT_BROWSER_MISSING_MARKER}'); exit 127 };`,
 		`& $agentBrowser.Source ${invocationArgs}`.trimEnd(),
 	].join(" ");
-	return { command: "powershell.exe", args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", commandLine] };
+	return { command: "powershell.exe", args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", protectWindowsShimInvocation(commandLine)] };
 }
 
 export function isWindowsAgentBrowserCommandMissing(stderr: string): boolean {
@@ -187,8 +188,14 @@ export function shouldCommitManagedRestoreAfterWindowsProcess(input: {
 	return !input.spawnError && !(input.exitCode !== 0 && isWindowsAgentBrowserCommandMissing(input.stderr));
 }
 
-function terminateSpawnedChild(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+function terminateSpawnedChild(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals, protectedWindowsShim = false): void {
 	if (child.exitCode !== null || child.signalCode !== null) return;
+	if (protectedWindowsShim) {
+		// The shim joins its job before launching any external command. Terminating
+		// its sole handle owner triggers kernel-owned cleanup, not a tree snapshot.
+		child.kill(signal);
+		return;
+	}
 	if (processPlatform === "win32" && child.pid) {
 		// Keep the launcher alive until taskkill has traversed its descendants.
 		// Killing it first races /T and leaves custom-shim processes orphaned.
@@ -644,6 +651,9 @@ export async function runAgentBrowserProcess(options: {
 				if (stdoutSpillHandle) {
 					await stdoutSpillHandle.close().catch(() => undefined);
 				}
+				if (processPlatform === "win32" && stderr.includes(WINDOWS_SHIM_JOB_FAILURE_MARKER) && !spawnError) {
+					spawnError = new Error(stderr.trim());
+				}
 				const windowsMissingBinary = processPlatform === "win32" && exitCode !== 0 && isWindowsAgentBrowserCommandMissing(stderr);
 				if (processPlatform === "win32" && !windowsMissingBinary && !spawnError) agentBrowserStarted = true;
 				if (windowsMissingBinary && !spawnError) {
@@ -697,9 +707,9 @@ export async function runAgentBrowserProcess(options: {
 			} else {
 				timedOut = true;
 			}
-			terminateSpawnedChild(child, "SIGTERM");
+			terminateSpawnedChild(child, "SIGTERM", processPlatform === "win32" && !nativeWindowsExecutable);
 			killTimer = setTimeout(() => {
-				terminateSpawnedChild(child, "SIGKILL");
+				terminateSpawnedChild(child, "SIGKILL", processPlatform === "win32" && !nativeWindowsExecutable);
 			}, 2_000);
 		};
 		const recordStdinError = (error: unknown) => {
