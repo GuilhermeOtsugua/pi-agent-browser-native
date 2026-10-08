@@ -193,6 +193,8 @@ export function buildErrorPresentation(options: {
 	const localhostNavigationHint = getLocalhostNavigationHint(commandInfo, safeErrorText);
 	const clipboardPermissionHint = getClipboardPermissionHint(commandInfo, safeErrorText);
 	const keyboardPressHint = getKeyboardPressHint(commandInfo, safeErrorText);
+	const incompleteNavigation = isOpenNavigationCommand(commandInfo.command)
+		&& /Invalid response:\s*EOF while parsing a value/i.test(safeErrorText);
 	const hintedErrorParts = [
 		selectorHintedErrorText,
 		unknownCommandSuggestionText && !selectorHintedErrorText.includes("Agent-browser hint:") ? unknownCommandSuggestionText : undefined,
@@ -200,6 +202,7 @@ export function buildErrorPresentation(options: {
 		localhostNavigationHint,
 		clipboardPermissionHint,
 		keyboardPressHint,
+		incompleteNavigation ? "Navigation may already have happened despite the incomplete daemon response. Inspect the current URL and take a fresh snapshot in the same session/tab before acting; do not open a duplicate tab or blindly repeat navigation." : undefined,
 	].filter((part): part is string => Boolean(part));
 	const hintedErrorText = hintedErrorParts.join("\n\n");
 	const categoryDetails = buildAgentBrowserResultCategoryDetails({
@@ -208,7 +211,22 @@ export function buildErrorPresentation(options: {
 		errorText: hintedErrorText,
 		succeeded: false,
 	});
+	const navigationInspectionActions: AgentBrowserNextAction[] = incompleteNavigation ? [
+		{
+			id: "inspect-navigation-outcome",
+			params: { args: withOptionalSessionArgs(sessionName, ["get", "url"]) },
+			reason: "Read back the navigation outcome without repeating the action.",
+			tool: "agent_browser",
+		},
+		{
+			id: "snapshot-navigation-outcome",
+			params: { args: withOptionalSessionArgs(sessionName, ["snapshot", "-i"]) },
+			reason: "Inspect the actual page and refreshed refs in the same session.",
+			tool: "agent_browser",
+		},
+	] : [];
 	const nextActions = [
+		...navigationInspectionActions,
 		...(buildUnknownCommandSuggestionActions(unknownCommandSuggestions, sessionName) ?? []),
 		...(browserProfileConfigRecovery?.actions ?? []),
 		...(browserProfileConfigRecovery ? [] : buildAgentBrowserNextActions({

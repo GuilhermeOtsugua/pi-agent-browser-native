@@ -292,6 +292,10 @@ export async function runAgentBrowserScript(options: RunAgentBrowserScriptOption
 		return buildFailedRun({ aborted: true, callCount: 0, emitCount: 0, error: "Script execution was aborted.", failureCategory: "aborted", rejectedCallCount: 0, steps: [] });
 	}
 
+	if (process.versions.bun) {
+		return buildFailedRun({ callCount: 0, emitCount: 0, error: "Script sandbox requires Node.js; Bun does not enforce the worker's process-permission boundary.", failureCategory: "validation-error", rejectedCallCount: 0, steps: [] });
+	}
+
 	let workerPath: string;
 	try {
 		workerPath = resolveScriptWorkerPath();
@@ -302,6 +306,9 @@ export async function runAgentBrowserScript(options: RunAgentBrowserScriptOption
 
 	const child = spawn(process.execPath, [
 		"--permission",
+		// Explicit entrypoint access also covers Windows canonical-path loading.
+		// Keep the grant file-scoped; the workspace and sibling files stay denied.
+		`--allow-fs-read=${workerPath}`,
 		"--max-old-space-size=64",
 		workerPath,
 		String(AGENT_BROWSER_SCRIPT_IPC_MESSAGE_MAX_BYTES),
@@ -519,7 +526,7 @@ export async function runAgentBrowserScript(options: RunAgentBrowserScriptOption
 		if (!stopping) void fail("Unable to start the script sandbox.", "upstream-error", {}, true);
 	});
 	child.once("exit", () => {
-		if (!stopping) void fail("Script sandbox exited before completion.", "upstream-error", {}, true);
+		if (!stopping) void fail(`Script sandbox exited before completion (exit ${child.exitCode ?? "unknown"}; runtime ${process.version}).`, "upstream-error", {}, true);
 	});
 
 	return await resultPromise;

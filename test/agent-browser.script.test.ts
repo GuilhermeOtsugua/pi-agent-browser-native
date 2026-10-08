@@ -67,6 +67,18 @@ test("script input schema and runtime validation enforce one top-level mode", ()
 	assert.ok(AGENT_BROWSER_SCRIPT_SPILL_MAX_BYTES * 2 <= AGENT_BROWSER_SCRIPT_IPC_MESSAGE_MAX_BYTES, "rehydrated spills must leave room for the response envelope");
 });
 
+test("script runner rejects hosts that cannot enforce Node process permissions", async () => {
+	Object.defineProperty(process.versions, "bun", { configurable: true, value: "fixture" });
+	try {
+		const result = await runAgentBrowserScript({ code: "emit(1)", dispatch: async () => { throw new Error("must not dispatch"); } });
+		assert.equal(result.ok, false);
+		assert.equal(result.failureCategory, "validation-error");
+		assert.match(result.error ?? "", /requires Node.js/);
+	} finally {
+		delete process.versions.bun;
+	}
+});
+
 test("script runner supports loops, conditionals, emit, and serialized Promise.all", async () => {
 	let active = 0;
 	let maxActive = 0;
@@ -489,7 +501,7 @@ else process.stdout.write(JSON.stringify({ success: true, data: { title: "Tree p
 			assert.equal((result.details?.scriptSession as { cleanup?: string } | undefined)?.cleanup, "closed");
 			assert.deepEqual(harness.appendedEntries.map((entry) => (entry.data as { cleanup?: string }).cleanup), ["active", "closed"]);
 			const invocations = await readInvocationLog(logPath);
-			assert.equal(invocations.filter((entry) => entry.args.at(-1) === "close").length, 1);
+			assert.equal(invocations.filter((entry) => entry.args.includes("close")).length, 1);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -584,7 +596,7 @@ test("agentBrowserExtension injects an isolated script session, persists its lea
 	const basePath = process.env.PATH ?? "";
 	await writeFakeAgentBrowserBinary(tempDir, `const fs = require("node:fs");
 const args = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, leasePresent: fs.existsSync(${JSON.stringify(leaseMarkerPath)}) }) + "\\n");
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, namespace: process.env.AGENT_BROWSER_NAMESPACE, leasePresent: fs.existsSync(${JSON.stringify(leaseMarkerPath)}) }) + "\\n");
 if (args.includes("session") && args.includes("info")) {
   process.stdout.write(JSON.stringify({ success: true, data: { active: false, runtime: null } }));
 } else if (args.includes("close")) {
@@ -640,14 +652,20 @@ emit(values);`,
 			assert.notEqual(secondSessionName, scriptSession?.sessionName, "every script call must receive a unique isolated session");
 			const afterScript = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "title"] });
 			assert.equal(afterScript.details?.sessionName, implicitSessionName, "script must not replace the current implicit session");
-			const invocations = await readInvocationLog(logPath) as Array<{ args: string[]; leasePresent?: boolean }>;
+			const invocations = await readInvocationLog(logPath) as Array<{ args: string[]; leasePresent?: boolean; namespace?: string }>;
 			assert.ok(invocations.length > 0);
 			const scriptInvocations = invocations.filter((entry) => entry.args.includes(scriptSession?.sessionName ?? "missing"));
 			assert.ok(scriptInvocations.every((entry) => entry.leasePresent === true), "lease must exist before every isolated-session fake upstream spawn");
 			const contentInvocations = scriptInvocations.filter((entry) => entry.args.includes("get") && entry.args.includes("title"));
 			assert.ok(contentInvocations.length >= 2);
 			for (const invocation of contentInvocations) {
-				assert.deepEqual(invocation.args.slice(invocation.args.indexOf("--namespace"), invocation.args.indexOf("--namespace") + 4), ["--namespace", "", "--session", scriptSession?.sessionName]);
+				if (process.platform === "win32") {
+					// Custom .cmd fixtures transfer an empty namespace through env.
+					assert.equal(invocation.namespace, "");
+					assert.deepEqual(invocation.args.slice(invocation.args.indexOf("--session"), invocation.args.indexOf("--session") + 2), ["--session", scriptSession?.sessionName]);
+				} else {
+					assert.deepEqual(invocation.args.slice(invocation.args.indexOf("--namespace"), invocation.args.indexOf("--namespace") + 4), ["--namespace", "", "--session", scriptSession?.sessionName]);
+				}
 			}
 			assert.deepEqual(JSON.parse(await readFile(outputPath, "utf8")), result.details?.data);
 		});
@@ -725,7 +743,7 @@ else process.stdout.write(JSON.stringify({ success: true, data: Array.from({ len
 	}
 });
 
-test("script still runs fail-closed cleanup when the main browser command never starts", { concurrency: false }, async () => {
+test("script still runs fail-closed cleanup when the main browser command never starts", { concurrency: false, skip: process.platform === "win32" ? "POSIX socket-path limit fixture; Windows uses named pipes" : false }, async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-script-preflight-"));
 	const logPath = join(tempDir, "invocations.log");
 	const socketDir = join(tempDir, "a".repeat(80));
