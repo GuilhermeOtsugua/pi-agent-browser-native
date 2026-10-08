@@ -94,9 +94,10 @@ function replaceBlock(content: string, id: BlockId, path: string): { next: strin
 	const afterEndIndex = endIndex + end.length;
 	const current = content.slice(startIndex, afterEndIndex);
 	const expected = markedBlock(id);
+	const lineEnding = current.includes("\r\n") ? "\r\n" : "\n";
 	return {
-		next: `${content.slice(0, startIndex)}${expected}${content.slice(afterEndIndex)}`,
-		drifted: current !== expected,
+		next: `${content.slice(0, startIndex)}${expected.replaceAll("\n", lineEnding)}${content.slice(afterEndIndex)}`,
+		drifted: current.replaceAll("\r\n", "\n") !== expected,
 	};
 }
 

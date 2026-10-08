@@ -649,6 +649,8 @@ For setup that must happen before first navigation, open a blank fresh page, sta
 
 ## Proof and verification
 
+[Windows lifecycle/restore hardening](docs/WINDOWS_HARDENING.md) records the bounded fixes, passing group, checkout smoke, and additional non-green platform suites; it is not a full release certification.
+
 `npm run docs` checks that generated playbook fragments and command-reference baseline blocks match their canonical sources (`extensions/agent-browser/lib/playbook.ts` and `scripts/agent-browser-capability-baseline.mjs`) without invoking upstream `agent-browser`.
 
 The local verification gate is:

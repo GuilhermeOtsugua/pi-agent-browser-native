@@ -10,15 +10,20 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { access, link, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
+import { extractUpstreamCommandTokens } from "../extensions/agent-browser/lib/argv-descriptor.js";
 import { compileAgentBrowserJob } from "../extensions/agent-browser/lib/input-modes/job.js";
-import { getAgentBrowserSocketDir } from "../extensions/agent-browser/lib/process.js";
+import { getAgentBrowserSocketDir, reorderWindowsLeadingGlobalArgs } from "../extensions/agent-browser/lib/process.js";
 
 function initializeGitProject(cwd: string): void {
 	execFileSync("git", ["init", "-q", cwd], { stdio: "ignore" });
+}
+
+function restoreFixtureEnv(home: string): NodeJS.ProcessEnv {
+	return { HOME: home, USERPROFILE: home, AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64) };
 }
 import { createManagedSessionRestoreKey, getManagedSessionRestoreScope } from "../extensions/agent-browser/lib/managed-session-restore.js";
 import {
@@ -265,7 +270,7 @@ if (args.includes("get") && args.includes("url")) {
 			assert.equal(otherSessionResult.isError, false, JSON.stringify(otherSessionResult));
 			const invocations = await readInvocationLog(logPath);
 			const callerRaceInvocations = invocations.filter((entry) => entry.args.includes("caller-race"));
-			assert.deepEqual(callerRaceInvocations.map((entry) => entry.args.slice(-2)), [
+			assert.deepEqual(callerRaceInvocations.map((entry) => extractUpstreamCommandTokens(entry.args).slice(-2)), [
 				["get", "url"],
 				["html", "body"],
 				["tab", "t2"],
@@ -436,7 +441,7 @@ if (args.includes("session") && args.includes("info")) {
 	);
 
 	try {
-		await withPatchedEnv({ AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64), HOME: tempDir, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ ...restoreFixtureEnv(tempDir), PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const opened = await executeRegisteredTool(harness.tool, harness.ctx, {
@@ -574,7 +579,7 @@ if (args.includes("session") && args.includes("info")) {
   process.stdout.write(JSON.stringify({ success: true, data: { title: "safe", url: "https://example.com/safe" } }));
 }`);
 	try {
-		await withPatchedEnv({ HOME: tempDir, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ ...restoreFixtureEnv(tempDir), PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const first = createExtensionHarness({ cwd: tempDir });
 			const second = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(first.handlers, "session_start", { reason: "new" }, first.ctx);
@@ -623,7 +628,7 @@ if (args.includes("session") && args.includes("info")) {
   process.stdout.write(JSON.stringify({ success: true, data: { title: "safe", url: "https://example.com/safe" } }));
 }`);
 	try {
-		await withPatchedEnv({ HOME: tempDir, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ ...restoreFixtureEnv(tempDir), PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const initial = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://example.com/safe"] });
@@ -724,7 +729,7 @@ if (args.includes("session") && args.includes("info")) {
   process.stdout.write(JSON.stringify({ success: true, data: { title: "safe", url: "https://example.com/safe" } }));
 }`);
 	try {
-		await withPatchedEnv({ HOME: tempDir, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ ...restoreFixtureEnv(tempDir), PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const initial = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--proxy", "http://127.0.0.1:8080", "open", "https://example.com/safe"] });
@@ -762,7 +767,7 @@ if (args.includes("session") && args.includes("info")) {
   process.stdout.write(JSON.stringify({ success: true, data: { title: "unsafe" } }));
 }`);
 	try {
-		await withPatchedEnv({ HOME: tempDir, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ ...restoreFixtureEnv(tempDir), PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, {
@@ -807,7 +812,7 @@ if (args.includes("session") && args.includes("info")) {
   process.stdout.write(JSON.stringify({ success: true, data: { title: "Example", url: "https://example.com" } }));
 }`);
 	try {
-		await withPatchedEnv({ HOME: tempDir, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ ...restoreFixtureEnv(tempDir), PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const first = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(first.handlers, "session_start", { reason: "new" }, first.ctx);
 			const opened = await executeRegisteredTool(first.tool, first.ctx, { args: ["open", "https://example.com"] });
@@ -848,7 +853,8 @@ if (args.includes("session") && args.includes("info")) {
 			await runExtensionEvent(first.handlers, "session_shutdown", { reason: "quit" }, first.ctx);
 			const closeInvocation = (await readInvocationLog(logPath)).find((entry) => entry.args.includes("close"));
 			assert.ok(closeInvocation);
-			assert.deepEqual(closeInvocation.args, ["--json", "--session", managedSessionName, "--config", attackerConfigPath, "--restore", "attacker-key", "close"]);
+			const expectedCloseArgs = ["--json", "--session", managedSessionName, "--config", attackerConfigPath, "--restore", "attacker-key", "close"];
+			assert.deepEqual(closeInvocation.args, process.platform === "win32" ? reorderWindowsLeadingGlobalArgs(expectedCloseArgs) : expectedCloseArgs);
 			assert.equal((closeInvocation as { restore?: string }).restore, undefined);
 			const sessions = join(tempDir, ".agent-browser", "sessions");
 			const ownershipDirectoryName = (await readdir(sessions)).find((name) => name === `.pi-agent-browser-owned-snapshots-v2-${priorKey}`);
@@ -884,7 +890,7 @@ if (args.includes("session") && args.includes("info")) {
   process.stdout.write(JSON.stringify({ success: true, data: { title: "Example", url: "https://example.com" } }));
 }`);
 	try {
-		await withPatchedEnv({ AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64), HOME: tempDir, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ ...restoreFixtureEnv(tempDir), PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const opened = await executeRegisteredTool(harness.tool, harness.ctx, {
@@ -955,11 +961,10 @@ if (args.includes("session") && args.includes("info")) {
 				HTTPS_PROXY: undefined,
 				PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: undefined,
 				PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1",
-				all_proxy: undefined,
-				http_proxy: undefined,
-				https_proxy: undefined,
+				...(process.platform !== "win32" ? { all_proxy: undefined, http_proxy: undefined, https_proxy: undefined } : {}),
 				...testCase.env,
 				HOME: tempDir,
+				USERPROFILE: tempDir,
 				PATH: `${tempDir}:${basePath}`,
 			}, async () => {
 				const harness = createExtensionHarness({ cwd: tempDir });
@@ -1016,10 +1021,8 @@ test("agentBrowserExtension does not sticky-disable restore when a suppressed sp
 			HTTP_PROXY: undefined,
 			HTTPS_PROXY: "http://127.0.0.1:8080",
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: undefined,
-			all_proxy: undefined,
-			http_proxy: undefined,
-			https_proxy: undefined,
-			HOME: tempDir,
+			...(process.platform !== "win32" ? { all_proxy: undefined, http_proxy: undefined, https_proxy: undefined } : {}),
+			...restoreFixtureEnv(tempDir),
 			PATH: "",
 		}, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
@@ -1029,7 +1032,7 @@ test("agentBrowserExtension does not sticky-disable restore when a suppressed sp
 			assert.notEqual(failed.details?.managedSessionRestoreDisabled, true);
 
 			delete process.env.HTTPS_PROXY;
-			process.env.PATH = `${tempDir}:${basePath}`;
+			process.env.PATH = `${tempDir}${delimiter}${basePath}`;
 			await writeFakeAgentBrowserBinary(
 				tempDir,
 				`const fs = require("node:fs");
@@ -1122,11 +1125,14 @@ setTimeout(() => process.stdout.write(JSON.stringify({ success: true, data: { ok
 				assert.equal(result.details?.resultCategory, "success");
 			}
 			const invocations = await readInvocationLog(logPath);
-			assert.deepEqual(invocations.map((entry) => entry.args.slice(-4)), [
-				["--session", invocations[0].args[2], "wait", "31000"],
-				["--download", "/tmp/export.csv", "--timeout", "30000"],
-				["--json", "--session", invocations[2].args[2], "batch"],
+			assert.deepEqual(invocations.map((entry) => extractUpstreamCommandTokens(entry.args)), [
+				["wait", "31000"],
+				["wait", "--download", "/tmp/export.csv", "--timeout", "30000"],
+				["batch"],
 			]);
+			for (const invocation of invocations) {
+				assert.match(invocation.args[invocation.args.indexOf("--session") + 1], /^piab-/);
+			}
 			assert.equal(invocations[2].stdin, batchWaitStdin);
 			assert.deepEqual(invocations.map((entry) => entry.defaultTimeout), ["25000", "25000", "25000"]);
 		});
@@ -1243,7 +1249,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { result: stdin.trim(
 			assert.equal(result.isError, false);
 			assert.equal((result.content[0] as { text: string }).text.split("\n")[0], "Fixture Title");
 			const [invocation] = await readInvocationLog(logPath);
-			assert.deepEqual(invocation?.args.slice(-2), ["eval", "--stdin"]);
+			assert.deepEqual(extractUpstreamCommandTokens(invocation?.args ?? []), ["eval", "--stdin"]);
 			assert.equal(invocation?.stdin, "document.title");
 		});
 	} finally {
@@ -1316,7 +1322,7 @@ if (args.includes("session") && args.includes("info")) {
   process.stdout.write(JSON.stringify({ success: true, data: { title: "ok", url: "about:blank" } }));
 }`);
 	try {
-		await withPatchedEnv({ HOME: tempDir, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ ...restoreFixtureEnv(tempDir), PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const failed = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["click", "#missing"], sessionMode: "fresh" });
@@ -1361,7 +1367,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { title: "ok", url: a
 
 	try {
 		const missingBinaryDir = await mkdtemp(join(tempDir, "missing-agent-browser-"));
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_SOCKET_DIR: socketDir }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_SOCKET_DIR: process.platform === "win32" ? undefined : socketDir }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -1869,7 +1875,7 @@ if (args.includes("batch")) {
 }`,
 	);
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_PROCESS_TIMEOUT_MS: "150" }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_PROCESS_TIMEOUT_MS: "2000" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			assert.equal((await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://example.test/start"] })).isError, false);
@@ -1993,7 +1999,7 @@ test("collectTimeoutPartialProgress reads page context for local URLs", { concur
 	const basePath = process.env.PATH ?? "";
 	await writeFakeAgentBrowserBinary(tempDir, `const fs = require("node:fs");
 const args = process.argv.slice(2);
-const subcommand = args.at(-1);
+const subcommand = args[args.indexOf("get") + 1];
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args }) + "\\n");
 const data = subcommand === "url"
   ? { result: "file:///tmp/local-timeout-page.html" }
@@ -2004,7 +2010,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 			const progress = await collectTimeoutPartialProgress({ command: "batch", cwd: tempDir, sessionName: "named", stdin: "[]" });
 			assert.equal(progress?.currentPage?.url, "file:///tmp/local-timeout-page.html");
 			assert.equal(progress?.currentPage?.title, "SECRET LOCAL TITLE");
-			assert.deepEqual((await readInvocationLog(logPath)).map((entry) => entry.args.at(-1)), ["url", "title"]);
+			assert.deepEqual((await readInvocationLog(logPath)).map((entry) => extractUpstreamCommandTokens(entry.args)[1]), ["url", "title"]);
 			assert.match(JSON.stringify(progress), /SECRET LOCAL TITLE/);
 		});
 	} finally {
@@ -2063,7 +2069,7 @@ test("agentBrowserExtension forwards wait --download saved-file metadata in deta
 
 			assert.equal(result.isError, true);
 			assert.equal(result.content[0]?.type, "text");
-			assert.match((result.content[0] as { text: string }).text, /Artifact verification failed: requested download was not found at \/tmp\/export\.csv/);
+			assert.ok((result.content[0] as { text: string }).text.includes(`Artifact verification failed: requested download was not found at ${resolve(tempDir, "/tmp/export.csv")}`));
 			assert.match((result.content[0] as { text: string }).text, /Download event reported; file not verified: \/tmp\/export\.csv/);
 			assert.equal(result.details?.savedFilePath, "/tmp/export.csv");
 			assert.deepEqual(result.details?.savedFile, {

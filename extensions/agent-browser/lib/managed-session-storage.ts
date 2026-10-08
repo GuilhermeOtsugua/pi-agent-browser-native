@@ -146,11 +146,14 @@ function readProjectGenerationMarker(path: string, platform: NodeJS.Platform): s
 function getDirectoryFilesystemIdentity(path: string, platform: NodeJS.Platform): string | undefined {
 	try {
 		const entry = statSync(path, { bigint: true });
-		if (!entry.isDirectory() || entry.dev <= 0n || entry.ino <= 0n) return undefined;
+		if (!entry.isDirectory() || entry.ino <= 0n || (platform !== "win32" && entry.dev <= 0n)) return undefined;
+		// Node reports dev=0 on Windows. Scope file IDs to the canonical volume root;
+		// retain birth time and the generation marker rather than falling back to a path.
+		const volume = platform === "win32" ? `${win32.parse(path).root.toLowerCase()}:` : "";
 		// ponytail: Android reports mutable ctime as birthtime; use statx birthtime/inode generation when Node exposes either reliably.
 		return platform === "android"
 			? `${entry.dev}:${entry.ino}`
-			: entry.birthtimeNs > 0n ? `${entry.dev}:${entry.ino}:${entry.birthtimeNs}` : undefined;
+			: entry.birthtimeNs > 0n ? `${volume}${entry.dev}:${entry.ino}:${entry.birthtimeNs}` : undefined;
 	} catch {
 		return undefined;
 	}

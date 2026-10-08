@@ -188,10 +188,18 @@ export function shouldCommitManagedRestoreAfterWindowsProcess(input: {
 }
 
 function terminateSpawnedChild(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+	if (child.exitCode !== null || child.signalCode !== null) return;
 	if (processPlatform === "win32" && child.pid) {
-		const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-		killer.on("error", () => undefined);
+		// Keep the launcher alive until taskkill has traversed its descendants.
+		// Killing it first races /T and leaves custom-shim processes orphaned.
+		const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+		const fallback = () => {
+			if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+		};
+		killer.once("error", fallback);
+		killer.once("close", code => { if (code !== 0) fallback(); });
 		killer.unref();
+		return;
 	}
 	child.kill(signal);
 }
@@ -683,7 +691,7 @@ export async function runAgentBrowserProcess(options: {
 		}
 
 		const terminateChild = (reason: "abort" | "timeout") => {
-			if (settled) return;
+			if (settled || aborted || timedOut) return;
 			if (reason === "abort") {
 				aborted = true;
 			} else {
