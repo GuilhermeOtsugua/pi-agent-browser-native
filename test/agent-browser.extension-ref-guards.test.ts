@@ -9,13 +9,15 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 
 import { directoryExists } from "../extensions/agent-browser/lib/fs-utils.js";
 import { createImplicitSessionName } from "../extensions/agent-browser/lib/runtime.js";
+import { reorderWindowsLeadingGlobalArgs } from "../extensions/agent-browser/lib/process.js";
 import { createSecureTempDirectory } from "../extensions/agent-browser/lib/temp.js";
 
 import {
@@ -29,22 +31,37 @@ import {
 	writeFakeAgentBrowserBinary,
 } from "./helpers/agent-browser-harness.js";
 
+function expectedSpawnArgs(args: string[]): string[] {
+	return process.platform === "win32" ? reorderWindowsLeadingGlobalArgs(args) : args;
+}
+
 function assertIsString(value: unknown): asserts value is string {
 	assert.equal(typeof value, "string");
 }
 
-function pidIsAlive(pid: number | undefined): boolean {
-	if (!pid) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
+import { disposeElectronScriptFixtures, registerElectronScriptFixture } from "./helpers/electron-script-spawn-fixture.js";
+import { isTestPidAlive as pidIsAlive, stopTestPid } from "./helpers/extension-validation-fixtures.js";
+
+const electronProcessFixtures: Array<{ child: ChildProcess; scriptDir: string; userDataDir: string }> = [];
+
+afterEach(async () => {
+	await disposeElectronScriptFixtures();
+	for (const { child, scriptDir, userDataDir } of electronProcessFixtures.splice(0)) {
+		await stopTestPid(child.pid);
+		assert.equal(pidIsAlive(child.pid), false, `Fixture PID ${child.pid} survived cleanup`);
+		await rm(scriptDir, { force: true, recursive: true });
+		await rm(userDataDir, { force: true, recursive: true });
 	}
-}
+});
 
 function spawnElectronFixtureProcess(userDataDir: string): ChildProcess {
-	const child = spawn("/bin/sh", ["-c", "while true; do sleep 1; done", "pi-agent-browser-electron-fixture", `--user-data-dir=${userDataDir}`], { detached: true, stdio: "ignore" });
+	const scriptDir = mkdtempSync(join(tmpdir(), "pi-agent-browser-electron-process-fixture-"));
+	const scriptPath = join(scriptDir, "electron-fixture.cjs");
+	writeFileSync(scriptPath, "#!/usr/bin/env node\nsetInterval(() => undefined, 1000);\n", "utf8");
+	chmodSync(scriptPath, 0o755);
+	registerElectronScriptFixture(scriptPath);
+	const child = spawn(scriptPath, [`--user-data-dir=${userDataDir}`], { detached: true, stdio: "ignore" });
+	electronProcessFixtures.push({ child, scriptDir, userDataDir });
 	child.unref();
 	return child;
 }
@@ -334,7 +351,8 @@ if (args.includes("open")) {
 			assert.equal(snapshot.isError, false, JSON.stringify(snapshot));
 			assert.equal(snapshot.details?.sessionName, secondSessionName);
 			const lastInvocation = (await readInvocationLog(logPath)).at(-1);
-			assert.deepEqual(lastInvocation?.args.slice(0, 3), ["--json", "--session", secondSessionName]);
+			assert.ok(lastInvocation?.args.includes("--json"));
+			assert.equal(lastInvocation?.args[(lastInvocation?.args.indexOf("--session") ?? -1) + 1], secondSessionName);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -460,7 +478,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { closed: args.includ
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
 
 			const invocations = await readInvocationLog(logPath);
-			assert.ok(invocations.some((entry) => entry.args.join("\0") === ["--session", electronSessionName, "close"].join("\0")));
+			assert.ok(invocations.some((entry) => entry.args.join("\0") === expectedSpawnArgs(["--session", electronSessionName, "close"]).join("\0")));
 			assert.equal(pidIsAlive(child?.pid), false);
 		});
 	} finally {
@@ -575,7 +593,8 @@ process.stdout.write(JSON.stringify({ success: true, data: { result: "https://sa
 				args: ["--namespace", namespace, "--session", sessionName, "get", "url"],
 			});
 			assert.equal(result.isError, false, result.content[0]?.text);
-			const invocation = (await readInvocationLog(logPath)).find((entry) => entry.args.includes("get") && entry.args.at(-1) === "url");
+			const invocation = (await readInvocationLog(logPath)).find((entry) => entry.args.includes("get") && entry.args.includes("url"));
+			assert.ok(invocation, "Expected the namespaced get url invocation");
 			assert.equal(invocation?.args.includes("--args"), false);
 			assert.equal(invocation?.args.includes("--allow-file-access"), false);
 		});
@@ -649,7 +668,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
 
 			const closeArgs = (await readInvocationLog(logPath)).map((entry) => entry.args).filter((args) => args.includes("close"));
-			assert.deepEqual(closeArgs, [["--session", electronSessionName, "close"]]);
+			assert.deepEqual(closeArgs, [expectedSpawnArgs(["--session", electronSessionName, "close"])]);
 			assert.equal(pidIsAlive(child?.pid), false);
 		});
 	} finally {
@@ -1041,7 +1060,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { closed: args.includ
 			assert.match(followUpSessionName, new RegExp(`^${baseSessionName}-fresh-[a-f0-9]{10}$`));
 			assert.notEqual(followUpSessionName, electronSessionName);
 			const invocations = await readInvocationLog(logPath);
-			assert.deepEqual(invocations[0]?.args, ["--session", electronSessionName, "close"]);
+			assert.deepEqual(invocations[0]?.args, expectedSpawnArgs(["--session", electronSessionName, "close"]));
 			assert.deepEqual(invocations.map((entry) => entry.sessionName), [electronSessionName, followUpSessionName]);
 		});
 	} finally {
@@ -1283,7 +1302,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { closed: args.includ
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "reload" }, harness.ctx);
 
 			const invocations = await readInvocationLog(logPath);
-			assert.ok(invocations.some((entry) => entry.args.join("\0") === ["--session", electronSessionName, "close"].join("\0")));
+			assert.ok(invocations.some((entry) => entry.args.join("\0") === expectedSpawnArgs(["--session", electronSessionName, "close"]).join("\0")));
 			assert.equal(pidIsAlive(child.pid), false);
 		});
 	} finally {
@@ -1347,7 +1366,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { closed: args.includ
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "reload" }, harness.ctx);
 
 			const invocations = await readInvocationLog(logPath);
-			assert.ok(invocations.some((entry) => entry.args.join("\0") === ["--session", electronSessionName, "close"].join("\0")));
+			assert.ok(invocations.some((entry) => entry.args.join("\0") === expectedSpawnArgs(["--session", electronSessionName, "close"]).join("\0")));
 			assert.ok(versionProbeCount > 0);
 			assert.equal(pidIsAlive(child.pid), false);
 			assert.equal(await directoryExists(userDataDir), true);
@@ -1417,7 +1436,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { closed: args.includ
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
 
 			const invocations = await readInvocationLog(logPath);
-			assert.ok(invocations.some((entry) => entry.args.join("\0") === ["--session", electronSessionName, "close"].join("\0")));
+			assert.ok(invocations.some((entry) => entry.args.join("\0") === expectedSpawnArgs(["--session", electronSessionName, "close"]).join("\0")));
 			assert.ok(versionProbeCount > 0);
 			assert.equal(pidIsAlive(child.pid), false);
 			assert.equal(await directoryExists(userDataDir), true);
@@ -1498,7 +1517,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { closed: args.includ
 
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "reload" }, harness.ctx);
 			const invocations = await readInvocationLog(logPath);
-			assert.ok(invocations.some((entry) => entry.args.join("\0") === ["--session", sessionB, "close"].join("\0")));
+			assert.ok(invocations.some((entry) => entry.args.join("\0") === expectedSpawnArgs(["--session", sessionB, "close"]).join("\0")));
 			assert.equal(pidIsAlive(childB.pid), false);
 			assert.equal(await directoryExists(userDataDirB), false);
 		});
@@ -1614,7 +1633,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { closed: args.includ
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
 
 			const closeArgs = (await readInvocationLog(logPath)).map((entry) => entry.args).filter((args) => args.includes("close"));
-			assert.deepEqual(closeArgs, [["--session", electronSessionName, "close"]]);
+			assert.deepEqual(closeArgs, [expectedSpawnArgs(["--session", electronSessionName, "close"])]);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -2148,7 +2167,7 @@ if (args.includes("snapshot")) {
   if (args.some((arg) => arg.includes("already-active"))) {
     process.stdout.write(JSON.stringify({ success: false, error: "Recording already active" }));
   } else {
-    const startPath = args[args.indexOf("start") + 1];
+    const startPath = args.slice(args.indexOf("start") + 1).find((arg) => arg.endsWith(".webm"));
     fs.writeFileSync(startPath, "webm");
     process.stdout.write(JSON.stringify({ success: true, data: { path: startPath } }));
   }
@@ -2161,7 +2180,7 @@ if (args.includes("snapshot")) {
     { command: ["click", "@e1"], success: true, data: { clicked: "@e1" } }
   ] }));
 } else if (args.includes("record") && args.includes("restart")) {
-  const restartPath = args[args.indexOf("restart") + 1];
+  const restartPath = args.slice(args.indexOf("restart") + 1).find((arg) => arg.endsWith(".webm"));
   refreshRecordings();
   fs.writeFileSync(restartPath, "webm");
   process.stdout.write(JSON.stringify({ success: true, data: { restarted: true, path: restartPath } }));
@@ -2935,7 +2954,7 @@ if (args.includes("snapshot")) {
 
 			// Upstream-effective raw artifact rows get parent directories prepared.
 			const rawScreenshot = await executeRegisteredTool(harness.tool, harness.ctx, {
-				args: ["batch", `screenshot ${join(tempDir, "raw", "dir", "shot.png")}`, "wait 10"],
+				args: ["batch", `screenshot '${join(tempDir, "raw", "dir", "shot.png")}'`, "wait 10"],
 			});
 			assert.equal(rawScreenshot.isError, false, JSON.stringify(rawScreenshot));
 			assert.equal(await directoryExists(join(tempDir, "raw", "dir")), true);
