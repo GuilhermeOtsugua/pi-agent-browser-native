@@ -23,7 +23,6 @@ import {
 } from "./helpers/agent-browser-harness.js";
 
 import { extractUpstreamCommandTokens } from '../extensions/agent-browser/lib/argv-descriptor.js';
-import { reorderWindowsLeadingGlobalArgs } from '../extensions/agent-browser/lib/process.js';
 
 // Remove wrapper transport flags wherever the shim placed them; retain caller
 // provider/device flags so these tests still verify their exact forwarding.
@@ -248,7 +247,7 @@ if (command === "mcp" && args.includes("--help")) {
 				["--json", "plugin", "list"],
 				["--json", "plugin", "show", "demo"],
 				["mcp", "--help"],
-			].map(args => ({ args: process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs(args) : args })));
+			].map(args => ({ args })));
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -301,7 +300,7 @@ if (subcommand === "list") {
 				["--json", "skills", "list"],
 				["--json", "skills", "get", "core", "--full"],
 				["--json", "skills", "path", "core"],
-			].map(args => ({ args: process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs(args) : args })));
+			].map(args => ({ args })));
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -385,8 +384,8 @@ if (skillIndex >= 0 && args[skillIndex + 1] === "get") {
 					return entry.args.includes('--session') && userArgs.length > 0 && extractUpstreamCommandTokens(entry.args)[0] !== 'close';
 				});
 				const sessionfulProviderCommands = providerCommands.filter((args) => !(args[0] === "-p" && args[1] === "ios" && args[2] === "device"));
-				assert.deepEqual(providerInvocations.map((entry) => stripWrapperPrefix(entry.args)), sessionfulProviderCommands.map(args => process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs([...args]) : [...args]));
-				assert.deepEqual(invocations.find((entry) => entry.args.includes("device") && entry.args.includes("list"))?.args, process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs(["--json", "-p", "ios", "device", "list"]) : ["--json", "-p", "ios", "device", "list"]);
+				assert.deepEqual(providerInvocations.map((entry) => stripWrapperPrefix(entry.args)), sessionfulProviderCommands.map(args => [...args]));
+				assert.deepEqual(invocations.find((entry) => entry.args.includes("device") && entry.args.includes("list"))?.args, ["--json", "-p", "ios", "device", "list"]);
 				assert.ok(providerInvocations.every(entry => entry.args.includes('--json') && entry.args.includes('--session')));
 				assert.ok(providerInvocations.some((entry) => entry.iosDevice === "iPhone 15 Pro"));
 				assert.ok(providerInvocations.some((entry) => entry.agentcoreApiKey === "agentcore-key"));
@@ -394,7 +393,7 @@ if (skillIndex >= 0 && args[skillIndex + 1] === "get") {
 				assert.ok(providerInvocations.some((entry) => entry.browserlessApiKey === "browserless-key"));
 				assert.ok(providerInvocations.some((entry) => entry.browserUseApiKey === "browser-use-key"));
 				assert.ok(providerInvocations.some((entry) => entry.kernelApiKey === "kernel-key"));
-				assert.deepEqual(invocations.filter(entry => extractUpstreamCommandTokens(entry.args)[0] === 'skills').map(entry => entry.args), skillCommands.map(args => process.platform === 'win32' ? reorderWindowsLeadingGlobalArgs(['--json', ...args]) : ['--json', ...args]));
+				assert.deepEqual(invocations.filter(entry => extractUpstreamCommandTokens(entry.args)[0] === 'skills').map(entry => entry.args), skillCommands.map(args => ['--json', ...args]));
 			},
 		);
 	} finally {
@@ -1019,7 +1018,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			const invocations = await readInvocationLog(logPath);
 			const userInvocations = invocations.map((entry) => stripWrapperPrefix(entry.args));
 			assert.deepEqual(userInvocations, commands.map((args) => stripWrapperPrefix(
-				process.platform === "win32" ? reorderWindowsLeadingGlobalArgs([...args]) : [...args],
+				[...args],
 			)));
 			assert.ok(invocations.every((entry) => entry.args.includes("--json")));
 			assert.ok(invocations.every((entry) => {

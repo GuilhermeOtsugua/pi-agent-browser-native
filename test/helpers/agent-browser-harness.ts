@@ -3,14 +3,14 @@
  * Responsibilities: Build fake pi extension contexts, run registered extension events/tools, patch process env safely, create fake agent-browser binaries, read invocation logs, and manage child-process fixtures.
  * Scope: Test-only utilities for `test/agent-browser.*.test.ts`; production code must not import this module.
  * Usage: Import focused helpers from `./helpers/agent-browser-harness.js` inside Node test-runner suites.
- * Invariants/Assumptions: Helpers preserve caller-owned cleanup responsibilities and restore patched environment variables after each run. `writeFakeAgentBrowserBinary` installs a Unix shell-script launcher or a Windows `agent-browser.cmd`; fake daemons report inactive `session info` by default, and stateful daemon tests set `PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO=1`; pass `platform: "win32"` to assert Windows launcher layout from non-Windows hosts (spawn/PATHEXT behavior still needs a real Windows runner).
+ * Invariants/Assumptions: Helpers preserve caller-owned cleanup responsibilities and restore patched environment variables after each run. `writeFakeAgentBrowserBinary` installs a Unix shell-script launcher or a Windows npm shim with an exact-path fake package-owned native executable (explicit `"legacy"` mode keeps custom-shim transport); fake daemons report inactive `session info` by default, and stateful daemon tests set `PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO=1`; pass `platform: "win32"` to assert Windows launcher layout from non-Windows hosts (spawn/PATHEXT behavior still needs a real Windows runner).
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
@@ -27,6 +27,7 @@ import type { TSchema } from "typebox";
 
 import agentBrowserExtension from "../../extensions/agent-browser/index.js";
 import { TARGET_AGENT_BROWSER_VERSION_LABEL } from "../../scripts/agent-browser-target.mjs";
+import { registerNativeCliFixture } from "./native-cli-spawn-fixture.js";
 
 export const TEST_SESSION_ID = "12345678-1234-5678-9abc-def012345678";
 export const DOWNLOAD_FIXTURE_CONTENT = "download contract fixture report\n";
@@ -573,6 +574,7 @@ export async function writeFakeAgentBrowserBinary(
 	tempDir: string,
 	scriptBody: string,
 	platform: NodeJS.Platform = processPlatform,
+	windowsMode: "native" | "legacy" = "native",
 ): Promise<string> {
 	const defaultSessionInfo = `if (process.env.PI_AGENT_BROWSER_TEST_PRESERVE_INTERNAL_LAUNCH_FLAGS !== "1") {
   const rawArgsIndex = process.argv.indexOf("--args");
@@ -600,6 +602,13 @@ if (process.env.PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO !== "1" && __piabFakeA
 			`@ECHO OFF\r\n"${nodeExecPath.replaceAll('"', '""')}" "${scriptPath.replaceAll('"', '""')}" %*\r\n`,
 			"utf8",
 		);
+		if (windowsMode === "native") {
+			const nativePath = join(tempDir, "node_modules", "agent-browser", "bin", `agent-browser-win32-${process.arch}.exe`);
+			await mkdir(dirname(nativePath), { recursive: true });
+			await writeFile(nativePath, "test-only native CLI placeholder\n", "utf8");
+			// A simulated layout on POSIX must not install a live spawn mock.
+			if (processPlatform === "win32") registerNativeCliFixture(nativePath, scriptPath);
+		}
 		return launcherPath;
 	}
 

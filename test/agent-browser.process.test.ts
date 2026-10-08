@@ -50,8 +50,13 @@ import {
 	executeRegisteredTool,
 	runExtensionEvent,
 	withPatchedEnv,
-	writeFakeAgentBrowserBinary,
+	writeFakeAgentBrowserBinary as writeFixtureBinary,
 } from "./helpers/agent-browser-harness.js";
+
+// Process transport/lifetime regressions intentionally exercise the custom shim.
+function writeFakeAgentBrowserBinary(tempDir: string, body: string, platform: NodeJS.Platform = process.platform) {
+	return writeFixtureBinary(tempDir, body, platform, "legacy");
+}
 
 test("resolveSpawnedChildExitCode prefers close, then timeout, then exit fallback", () => {
 	assert.equal(

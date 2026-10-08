@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 
 import { extractUpstreamCommandTokens } from "../extensions/agent-browser/lib/argv-descriptor.js";
 import { compileAgentBrowserJob } from "../extensions/agent-browser/lib/input-modes/job.js";
-import { getAgentBrowserSocketDir, reorderWindowsLeadingGlobalArgs } from "../extensions/agent-browser/lib/process.js";
+import { getAgentBrowserSocketDir } from "../extensions/agent-browser/lib/process.js";
 
 function initializeGitProject(cwd: string): void {
 	execFileSync("git", ["init", "-q", cwd], { stdio: "ignore" });
@@ -854,7 +854,7 @@ if (args.includes("session") && args.includes("info")) {
 			const closeInvocation = (await readInvocationLog(logPath)).find((entry) => entry.args.includes("close"));
 			assert.ok(closeInvocation);
 			const expectedCloseArgs = ["--json", "--session", managedSessionName, "--config", attackerConfigPath, "--restore", "attacker-key", "close"];
-			assert.deepEqual(closeInvocation.args, process.platform === "win32" ? reorderWindowsLeadingGlobalArgs(expectedCloseArgs) : expectedCloseArgs);
+			assert.deepEqual(closeInvocation.args, expectedCloseArgs);
 			assert.equal((closeInvocation as { restore?: string }).restore, undefined);
 			const sessions = join(tempDir, ".agent-browser", "sessions");
 			const ownershipDirectoryName = (await readdir(sessions)).find((name) => name === `.pi-agent-browser-owned-snapshots-v2-${priorKey}`);

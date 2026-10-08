@@ -17,7 +17,6 @@ import test, { afterEach } from "node:test";
 
 import { directoryExists } from "../extensions/agent-browser/lib/fs-utils.js";
 import { createImplicitSessionName } from "../extensions/agent-browser/lib/runtime.js";
-import { reorderWindowsLeadingGlobalArgs } from "../extensions/agent-browser/lib/process.js";
 import { createSecureTempDirectory } from "../extensions/agent-browser/lib/temp.js";
 
 import {
@@ -32,7 +31,8 @@ import {
 } from "./helpers/agent-browser-harness.js";
 
 function expectedSpawnArgs(args: string[]): string[] {
-	return process.platform === "win32" ? reorderWindowsLeadingGlobalArgs(args) : args;
+	// Standard native installs forward the planner's argv unchanged.
+	return args;
 }
 
 function assertIsString(value: unknown): asserts value is string {

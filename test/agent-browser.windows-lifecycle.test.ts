@@ -8,7 +8,12 @@ import test from "node:test";
 
 import { hasManagedSessionRestoreProjectIdentity, createManagedSessionRestoreKey } from "../extensions/agent-browser/lib/managed-session-storage.js";
 import { buildAgentBrowserSpawnCommand, runAgentBrowserProcess } from "../extensions/agent-browser/lib/process.js";
-import { writeFakeAgentBrowserBinary } from "./helpers/agent-browser-harness.js";
+import { writeFakeAgentBrowserBinary as writeFixtureBinary } from "./helpers/agent-browser-harness.js";
+
+// These cancellation/lifetime regressions deliberately use PowerShell/custom CMD.
+function writeFakeAgentBrowserBinary(root: string, body: string) {
+	return writeFixtureBinary(root, body, process.platform, "legacy");
+}
 
 const windowsOnly = { skip: process.platform !== "win32" };
 
