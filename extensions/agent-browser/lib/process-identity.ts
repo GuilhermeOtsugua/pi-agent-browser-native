@@ -10,15 +10,19 @@ export interface ProcessStartIdentityCommand {
 	file: string;
 }
 
+export function getWindowsPowerShellExecutable(): string {
+	const configuredSystemRoot = process.env.SystemRoot;
+	const windowsSystemRoot = configuredSystemRoot && win32.isAbsolute(configuredSystemRoot)
+		? configuredSystemRoot
+		: DEFAULT_WINDOWS_SYSTEM_ROOT;
+	return win32.join(windowsSystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
 export function buildProcessStartIdentityCommand(
 	pid: number,
 	platform: NodeJS.Platform = process.platform,
 ): ProcessStartIdentityCommand | undefined {
 	if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
-	const configuredSystemRoot = process.env.SystemRoot;
-	const windowsSystemRoot = configuredSystemRoot && win32.isAbsolute(configuredSystemRoot)
-		? configuredSystemRoot
-		: DEFAULT_WINDOWS_SYSTEM_ROOT;
 	return platform === "win32"
 		? {
 			args: [
@@ -27,7 +31,7 @@ export function buildProcessStartIdentityCommand(
 				"-Command",
 				`$p = Get-Process -Id ${pid} -ErrorAction Stop; Write-Output ("${WINDOWS_PROCESS_START_IDENTITY_PREFIX}" + $p.StartTime.ToUniversalTime().Ticks)`,
 			],
-			file: win32.join(windowsSystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+			file: getWindowsPowerShellExecutable(),
 		}
 		: {
 			args: ["-p", String(pid), "-o", "lstart="],

@@ -6,6 +6,7 @@ import { fetchCdpJson, parseCdpTargets, parseCdpVersion } from "./cdp.js";
 import { ELECTRON_PROFILE_DIR_PREFIX, type ElectronCdpTarget, type ElectronCdpVersion, type ElectronLaunchRecord } from "./launch.js";
 import { pathExists } from "../fs-utils.js";
 import { getSecureTempChildDirectoryValidationError } from "../temp.js";
+import { getWindowsPowerShellExecutable } from "../process-identity.js";
 
 const ELECTRON_CLEANUP_DEFAULT_TIMEOUT_MS = 5_000;
 const ELECTRON_CLEANUP_POLL_INTERVAL_MS = 100;
@@ -84,11 +85,27 @@ async function waitForProcessExit(child: ChildProcess | undefined, pid: number |
 	return isPidAlive(pid) === false;
 }
 
-async function readPidCommandLine(pid: number | undefined): Promise<string | undefined> {
+export function buildElectronProcessCommandLineCommand(
+	pid: number | undefined,
+	platform: NodeJS.Platform = process.platform,
+): { file: string; args: string[] } | undefined {
 	if (!pid || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
+	if (platform !== "win32") return { file: "ps", args: ["-ww", "-p", String(pid), "-o", "command="] };
+	return {
+		file: getWindowsPowerShellExecutable(),
+		args: ["-NoProfile", "-NonInteractive", "-Command",
+			`$p = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop; if ($p) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::Write($p.CommandLine) }`],
+	};
+}
+
+async function readPidCommandLine(pid: number | undefined): Promise<string | undefined> {
+	const command = buildElectronProcessCommandLineCommand(pid);
+	if (!command) return undefined;
 	try {
-		const { stdout } = await execFileAsync("ps", ["-ww", "-p", String(pid), "-o", "command="], {
+		const { stdout } = await execFileAsync(command.file, command.args, {
 			timeout: RESTORED_PROCESS_COMMAND_TIMEOUT_MS,
+			maxBuffer: 64 * 1024,
+			windowsHide: true,
 		});
 		return stdout.trim() || undefined;
 	} catch {
@@ -96,8 +113,12 @@ async function readPidCommandLine(pid: number | undefined): Promise<string | und
 	}
 }
 
-function restoredLaunchCommandMatchesRecord(record: ElectronLaunchRecord, commandLine: string | undefined): boolean {
-	return commandLine?.includes(`--user-data-dir=${record.userDataDir}`) === true;
+export function restoredLaunchCommandMatchesRecord(record: ElectronLaunchRecord, commandLine: string | undefined): boolean {
+	if (!commandLine || !record.userDataDir) return false;
+	const path = record.userDataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	// Windows quotes either the entire argv token or just its value. POSIX ps
+	// may render argv without quotes. Require the whole flag, never a path prefix.
+	return new RegExp(`(?:^|\\s)(?:"--user-data-dir=${path}"|--user-data-dir="${path}"|--user-data-dir=${path})(?=\\s|$)`).test(commandLine);
 }
 
 async function getRestoredProcessVerificationError(record: ElectronLaunchRecord): Promise<string | undefined> {

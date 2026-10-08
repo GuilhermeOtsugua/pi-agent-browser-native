@@ -7,10 +7,13 @@
  */
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import test from "node:test";
+import { basename, delimiter, dirname, join } from "node:path";
+import test, { afterEach } from "node:test";
+import { disposeElectronScriptFixtures } from "./helpers/electron-script-spawn-fixture.js";
+afterEach(disposeElectronScriptFixtures);
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
@@ -57,7 +60,7 @@ test("agentBrowserExtension supports Electron launch handoff modes", { concurren
 		await mkdir(applicationsDir, { recursive: true });
 		const app = await writeFakeLaunchableElectronApp({ applicationsDir, bundleId: "com.example.HandoffElectron", launchLogPath, name: "Handoff Electron" });
 		await writeFakeAgentBrowserBinary(tempDir, fakeAgentBrowserLifecycleScript(upstreamLogPath));
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			for (const [handoff, expectedCommands] of [["connect", ["connect"]], ["tabs", ["connect", "tab"]]] as const) {
 				await rm(upstreamLogPath, { force: true });
 				const harness = createExtensionHarness({ cwd: tempDir });
@@ -73,6 +76,7 @@ test("agentBrowserExtension supports Electron launch handoff modes", { concurren
 			}
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -108,7 +112,7 @@ if (command === "close") {
 }
 process.stdout.write(JSON.stringify({ success: true, data: { connected: true } }));`,
 		);
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const launchResult = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "launch", appPath: app.appPath, handoff: "connect", targetType: "webview" } });
@@ -124,6 +128,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { connected: true } }
 			assert.equal(isTestPidAlive(launchDetails.electron.launch.pid), false);
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -163,6 +168,7 @@ test("agentBrowserExtension aborts Electron launch before and during app startup
 		await assert.rejects(stat(launch.userDataDir));
 		assert.equal(isTestPidAlive(launch.pid), false);
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -177,7 +183,7 @@ test("agentBrowserExtension blocks Electron launch by caller policy without spaw
 		await mkdir(applicationsDir, { recursive: true });
 		const app = await writeFakeLaunchableElectronApp({ applicationsDir, bundleId: "com.example.PolicyElectron", launchLogPath, name: "Policy Electron" });
 		await writeFakeAgentBrowserBinary(tempDir, fakeAgentBrowserLifecycleScript(upstreamLogPath));
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, {
@@ -190,6 +196,7 @@ test("agentBrowserExtension blocks Electron launch by caller policy without spaw
 			await assert.rejects(readFile(launchLogPath, "utf8"));
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -240,7 +247,8 @@ test("agentBrowserExtension cleans Electron resources when launch fails before u
 				assert.equal(isTestPidAlive(diagnosticPid), false, mode);
 			});
 		} finally {
-			await rm(tempDir, { force: true, recursive: true });
+			await disposeElectronScriptFixtures();
+		await rm(tempDir, { force: true, recursive: true });
 		}
 	}
 });
@@ -255,7 +263,8 @@ test("agentBrowserExtension cleans Electron resources when upstream connect cann
 		await mkdir(applicationsDir, { recursive: true });
 		await mkdir(emptyBinDir, { recursive: true });
 		await mkdir(nodeOnlyBinDir, { recursive: true });
-		await symlink(process.execPath, join(nodeOnlyBinDir, "node"), "file");
+		// Windows uses the exact-script Node adapter, so needs no privileged file symlink.
+		if (process.platform !== "win32") await symlink(process.execPath, join(nodeOnlyBinDir, "node"), "file");
 		const app = await writeFakeLaunchableElectronApp({ applicationsDir, bundleId: "com.example.MissingUpstreamElectron", launchLogPath, name: "Missing Upstream Electron" });
 		// Put a `node` shim on PATH so the fake Electron `#!/usr/bin/env node` launcher can start, but keep
 		// `agent-browser` off PATH so upstream `connect` fails with ENOENT (missing-binary) instead of picking up
@@ -275,6 +284,7 @@ test("agentBrowserExtension cleans Electron resources when upstream connect cann
 			assert.equal(isTestPidAlive(launchLog.pid), false);
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -309,7 +319,32 @@ test("agentBrowserExtension keeps restored Electron profile when process ownersh
 });
 
 
-test("agentBrowserExtension restores Electron launch records and cleans them on shutdown", { concurrency: false }, async () => {
+test("agentBrowserExtension refuses a live restored PID with a lookalike suffixed profile", { concurrency: false }, async () => {
+	const userDataDir = await createSecureTempDirectory("electron-profile-");
+	const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "--", `--user-data-dir=${userDataDir}-unrelated`], { stdio: "ignore" });
+	try {
+		await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+		const result = await cleanupElectronLaunchResources({
+			record: {
+				appName: "Unrelated process", cleanupState: "active", createdAtMs: Date.now(),
+				executablePath: process.execPath, launchId: "electron-lookalike-test", launchedByWrapper: true,
+				pid: child.pid, port: 9, userDataDir, version: 1,
+			},
+			timeoutMs: 1_000,
+		});
+		assert.equal(result.partial, true);
+		assert.equal(result.steps.find((step) => step.resource === "process")?.state, "failed");
+		assert.match(result.steps.find((step) => step.resource === "process")?.error ?? "", /does not include wrapper-owned user data dir/);
+		assert.equal(isTestPidAlive(child.pid), true, "unrelated lookalike process must remain alive");
+		assert.equal(result.steps.find((step) => step.resource === "user-data-dir")?.state, "skipped");
+		await stat(userDataDir);
+	} finally {
+		await stopTestPid(child.pid);
+		await rm(userDataDir, { force: true, recursive: true });
+	}
+});
+
+ test("agentBrowserExtension restores Electron launch records and cleans them on shutdown", { concurrency: false }, async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-electron-restore-"));
 	const applicationsDir = join(tempDir, "Applications");
 	const upstreamLogPath = join(tempDir, "agent-browser.log");
@@ -320,7 +355,7 @@ test("agentBrowserExtension restores Electron launch records and cleans them on 
 		await mkdir(applicationsDir, { recursive: true });
 		const app = await writeFakeLaunchableElectronApp({ applicationsDir, bundleId: "com.example.RestoreElectron", launchLogPath, name: "Restore Electron" });
 		await writeFakeAgentBrowserBinary(tempDir, fakeAgentBrowserLifecycleScript(upstreamLogPath));
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const firstHarness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(firstHarness.handlers, "session_start", { reason: "new" }, firstHarness.ctx);
 			const launchResult = await executeRegisteredTool(firstHarness.tool, firstHarness.ctx, { electron: { action: "launch", appPath: app.appPath, handoff: "connect" } });
@@ -340,6 +375,7 @@ test("agentBrowserExtension restores Electron launch records and cleans them on 
 		});
 	} finally {
 		await stopTestPid(launchedPid);
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -406,6 +442,7 @@ test("electron discovery finds macOS Electron app bundles with query filtering",
 		});
 		assert.deepEqual(electronAppNames(byBundleId.apps), ["Alpha App"]);
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -436,6 +473,7 @@ test("electron discovery annotates likely sensitive apps without blocking discov
 		assert.deepEqual(byName.get("Visual Studio Code")?.sensitivity?.categories, ["developer-workspace"]);
 		assert.equal(byName.get("Plain Electron")?.sensitivity, undefined);
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -457,13 +495,13 @@ test("electron discovery scans Linux desktop files and applies Electron evidence
 Type=Application
 Name=Demo Electron
 Comment=Demo comment
-Exec=${electronExecutable} %U --ignored-field-code %F
+Exec="${electronExecutable.replaceAll("\\", "/")}" %U --ignored-field-code %F
 Icon=demo-icon
 `, "utf8");
 		await writeFile(join(desktopDir, "plain.desktop"), `[Desktop Entry]
 Type=Application
 Name=Plain Binary
-Exec=${plainExecutable} %U
+Exec="${plainExecutable.replaceAll("\\", "/")}" %U
 `, "utf8");
 		await writeFile(join(desktopDir, "hidden.desktop"), `[Desktop Entry]
 Type=Application
@@ -498,12 +536,15 @@ Exec=${electronExecutable}
 
 		const binDir = join(tempDir, "bin");
 		await mkdir(binDir, { recursive: true });
-		const symlinkPath = join(binDir, "demo-link");
-		await symlink(electronExecutable, symlinkPath);
+		// Directory junctions need no Windows symlink privilege; realpath still resolves
+		// the executable alias to the same evidence-bearing directory.
+		const aliasDirectory = join(binDir, "demo-link");
+		await symlink(dirname(electronExecutable), aliasDirectory, process.platform === "win32" ? "junction" : "dir");
+		const symlinkPath = join(aliasDirectory, basename(electronExecutable));
 		await writeFile(join(desktopDir, "symlink.desktop"), `[Desktop Entry]
 Type=Application
 Name=Symlink Electron
-Exec=${symlinkPath}
+Exec="${symlinkPath.replaceAll("\\", "/")}"
 `, "utf8");
 		const symlinkResult = await discoverElectronApps({
 			locations: { linuxDesktopDirectories: [desktopDir], pathEnv: "" },
@@ -530,6 +571,7 @@ Exec=/usr/bin/flatpak run com.example.Flat
 		assert.equal(flatpakResult.apps[0]?.executablePath, realFlatpakExecutable);
 		assert.equal(flatpakResult.apps[0]?.packageSource, "flatpak");
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -561,6 +603,7 @@ test("electron discovery caps results, clamps maxResults, and reports omittedCou
 		assert.equal(smallCap.apps.length, 3);
 		assert.equal(smallCap.omittedCount, ELECTRON_DISCOVERY_MAX_RESULTS - 1);
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });

@@ -6,6 +6,7 @@
 
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { registerElectronScriptFixture } from "./electron-script-spawn-fixture.js";
 
 import { Theme } from "@earendil-works/pi-coding-agent";
 
@@ -287,6 +288,8 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 `, "utf8");
 	await chmod(app.executablePath, 0o755);
+	// Windows cannot execute the POSIX shebang. Only this generated script is adapted.
+	registerElectronScriptFixture(app.executablePath);
 	return app;
 }
 
@@ -305,9 +308,15 @@ export function fakeAgentBrowserLifecycleScript(logPath: string, options: {
 	const tabTitle = options.tabTitle ?? "Demo Electron";
 	const tabUrl = options.tabUrl ?? "app://demo";
 	return `const fs = require("node:fs");
-const args = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, autosave: process.env.AGENT_BROWSER_AUTOSAVE_INTERVAL_MS ?? null, idleTimeout: process.env.AGENT_BROWSER_IDLE_TIMEOUT_MS || null, restore: process.env.AGENT_BROWSER_RESTORE || null }) + "\\n");
+let args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, namespace: process.env.AGENT_BROWSER_NAMESPACE ?? null, autosave: process.env.AGENT_BROWSER_AUTOSAVE_INTERVAL_MS ?? null, idleTimeout: process.env.AGENT_BROWSER_IDLE_TIMEOUT_MS || null, restore: process.env.AGENT_BROWSER_RESTORE || null }) + "\\n");
 const valueFlags = new Set(["--session", "--namespace", "--profile", "--state", "--session-name", "--restore-save", "--restore-check-url", "--restore-check-text", "--restore-check-fn", "--cdp", "--provider", "-p", "--device", "--user-agent"]);
+// Upstream removes globals across the entire command tail. Windows .cmd
+// dispatch can move them between the command and its subcommand.
+args = args.filter((token, index, all) => {
+	if (valueFlags.has(token) || valueFlags.has(all[index - 1])) return false;
+	return !["--json", "--headed"].includes(token);
+});
 let commandIndex = -1;
 for (let i = 0; i < args.length; i += 1) {
 	const token = args[i];

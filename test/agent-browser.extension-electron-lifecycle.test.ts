@@ -10,10 +10,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test from "node:test";
+import { delimiter, join } from "node:path";
+import test, { afterEach } from "node:test";
+import { disposeElectronScriptFixtures } from "./helpers/electron-script-spawn-fixture.js";
+afterEach(disposeElectronScriptFixtures);
 
 import { Check } from "typebox/value";
+import { extractUpstreamCommandTokens } from "../extensions/agent-browser/lib/argv-descriptor.js";
 
 import { createManagedSessionRestoreKey, getManagedSessionRestoreScope } from "../extensions/agent-browser/lib/managed-session-restore.js";
 import { getSessionPageStateKey, SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
@@ -65,7 +68,7 @@ process.stdout.write(JSON.stringify({ success: true, data: "should not run" }));
 	}
 
 	try {
-		await withPatchedEnv({ HOME: tempDir, PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ HOME: tempDir, USERPROFILE: tempDir, PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			assert.equal(Check(harness.tool.parameters, { electron: { action: "list" } }), true);
 			assert.equal(Check(harness.tool.parameters, { electron: { action: "list", maxResults: 10, query: "code" } }), true);
@@ -184,6 +187,7 @@ process.stdout.write(JSON.stringify({ success: true, data: "should not run" }));
 			assert.equal(reservedAppArg.details?.failureCategory, "validation-error");
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -206,7 +210,7 @@ if (args.includes("session") && args.includes("info")) {
 } else {
   process.stdout.write(JSON.stringify({ success: true, data: { title: "unexpected", url: "about:blank" } }));
 }`);
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, {
@@ -223,6 +227,7 @@ if (args.includes("session") && args.includes("info")) {
 		});
 	} finally {
 		if (launchPid) await stopTestPid(launchPid);
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -239,7 +244,7 @@ test("agentBrowserExtension allows local Electron snapshot handoff", { concurren
 		await mkdir(applicationsDir, { recursive: true });
 		const app = await writeFakeLaunchableElectronApp({ applicationsDir, bundleId: "com.example.ProtectedHandoff", launchLogPath, name: "Protected Handoff" });
 		await writeFakeAgentBrowserBinary(tempDir, fakeAgentBrowserLifecycleScript(upstreamLogPath, { sessionUrl: protectedUrl, snapshotTitle: "SECRET LOCAL CONTENT", snapshotUrl: protectedUrl }));
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "launch", appPath: app.appPath } });
@@ -258,6 +263,7 @@ test("agentBrowserExtension allows local Electron snapshot handoff", { concurren
 		});
 	} finally {
 		if (launchPid) await stopTestPid(launchPid);
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -287,7 +293,7 @@ else {
       : command === "connect" ? { connected: true } : { closed: true };
   process.stdout.write(JSON.stringify({ success: true, data }));
 }`);
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const controller = new AbortController();
@@ -304,6 +310,7 @@ else {
 		});
 	} finally {
 		if (launchPid) await stopTestPid(launchPid);
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -319,7 +326,7 @@ test("agentBrowserExtension launches Electron with isolated profile, snapshot ha
 		await mkdir(applicationsDir, { recursive: true });
 		const app = await writeFakeLaunchableElectronApp({ applicationsDir, bundleId: "com.example.DemoElectron", launchLogPath, name: "Demo Electron" });
 		await writeFakeAgentBrowserBinary(tempDir, fakeAgentBrowserLifecycleScript(upstreamLogPath));
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -363,8 +370,8 @@ test("agentBrowserExtension launches Electron with isolated profile, snapshot ha
 			await stat(launchDetails.electron.launch.userDataDir);
 
 			const invocationsAfterLaunch = await readInvocationLog(upstreamLogPath);
-			assert.deepEqual(invocationsAfterLaunch.map((entry) => entry.args.at(-2)), ["connect", "get", "tab", "snapshot"]);
-			assert.equal(invocationsAfterLaunch[1]?.args.at(-1), "url");
+			assert.deepEqual(invocationsAfterLaunch.map((entry) => extractUpstreamCommandTokens(entry.args).at(-2)), ["connect", "get", "tab", "snapshot"]);
+			assert.equal(extractUpstreamCommandTokens(invocationsAfterLaunch[1]?.args ?? []).at(-1), "url");
 			assert.equal(invocationsAfterLaunch[0]?.args.includes("--session"), true);
 
 			await rm(upstreamLogPath, { force: true });
@@ -379,8 +386,8 @@ test("agentBrowserExtension launches Electron with isolated profile, snapshot ha
 			assert.equal(((statusResult.details?.electron as { targets?: unknown[] } | undefined)?.targets ?? []).length, 1);
 			const statusInvocations = await readInvocationLog(upstreamLogPath);
 			assert.equal(statusInvocations.length, 2);
-			assert.deepEqual(statusInvocations.map((entry) => entry.args.at(-1)), ["url", "title"]);
-			assert.equal(statusInvocations.every((entry) => entry.args[entry.args.indexOf("--namespace") + 1] === ""), true);
+			assert.deepEqual(statusInvocations.map((entry) => extractUpstreamCommandTokens(entry.args).at(-1)), ["url", "title"]);
+			assert.equal(statusInvocations.every((entry) => (entry.args.includes("--namespace") ? entry.args[entry.args.indexOf("--namespace") + 1] : (entry as { namespace?: string | null }).namespace) === ""), true);
 			assert.equal(statusInvocations.every((entry) => (entry as { restore?: string | null }).restore === null), true);
 
 			await rm(upstreamLogPath, { force: true });
@@ -409,9 +416,9 @@ test("agentBrowserExtension launches Electron with isolated profile, snapshot ha
 			assert.equal(probeDetails.sessionName, launchDetails.electron.launch.sessionName);
 			assert.deepEqual(probeDetails.sessionTabTarget, { title: "Demo Electron", url: "app://demo" });
 			const probeInvocations = await readInvocationLog(upstreamLogPath);
-			assert.deepEqual(probeInvocations.map((entry) => entry.args.at(-2)), ["get", "get", "eval", "tab", "snapshot"]);
-			assert.deepEqual(probeInvocations.slice(0, 2).map((entry) => entry.args.at(-1)), ["url", "title"]);
-			assert.equal(probeInvocations.every((entry) => entry.args[entry.args.indexOf("--namespace") + 1] === ""), true);
+			assert.deepEqual(probeInvocations.map((entry) => extractUpstreamCommandTokens(entry.args).at(-2)), ["get", "get", "eval", "tab", "snapshot"]);
+			assert.deepEqual(probeInvocations.slice(0, 2).map((entry) => extractUpstreamCommandTokens(entry.args).at(-1)), ["url", "title"]);
+			assert.equal(probeInvocations.every((entry) => (entry.args.includes("--namespace") ? entry.args[entry.args.indexOf("--namespace") + 1] : (entry as { namespace?: string | null }).namespace) === ""), true);
 			assert.equal(probeInvocations.every((entry) => (entry as { restore?: string | null }).restore === null), true);
 
 			harness.setBranch([{ type: "message", message: { details: { ...launchResult.details, namespace: "team" }, isError: false, toolName: "agent_browser" } }]);
@@ -466,11 +473,12 @@ test("agentBrowserExtension launches Electron with isolated profile, snapshot ha
 			assert.doesNotMatch(releasedRecordingPath.content[0]?.text ?? "", /reserved by an active recording/);
 			await assert.rejects(stat(launchDetails.electron.launch.userDataDir));
 			const finalInvocations = await readInvocationLog(upstreamLogPath);
-			const cleanupClose = finalInvocations.find((entry) => entry.args.at(-1) === "close");
+			const cleanupClose = finalInvocations.find((entry) => extractUpstreamCommandTokens(entry.args).at(-1) === "close");
 			assert.ok(cleanupClose);
 			assert.equal(cleanupClose.args[cleanupClose.args.indexOf("--namespace") + 1], "team");
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -489,7 +497,7 @@ test("agentBrowserExtension retains headed autosave policy for Electron cleanup 
 		await withPatchedEnv({
 			AGENT_BROWSER_AUTOSAVE_INTERVAL_MS: undefined,
 			AGENT_BROWSER_HEADED: "1",
-			PATH: `${tempDir}:${basePath}`,
+			PATH: `${tempDir}${delimiter}${basePath}`,
 		}, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
@@ -522,6 +530,7 @@ test("agentBrowserExtension retains headed autosave policy for Electron cleanup 
 		});
 	} finally {
 		if (launchedPid) await stopTestPid(launchedPid);
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -537,8 +546,10 @@ test("agentBrowserExtension applies managed restore policy to every current-sess
 			ALL_PROXY: undefined,
 			HTTP_PROXY: undefined,
 			HTTPS_PROXY: undefined,
-			HOME: tempDir,
-			PATH: `${tempDir}:${basePath}`,
+			HOME: tempDir, USERPROFILE: tempDir,
+			// Native Windows restore storage requires an explicit upstream 256-bit key.
+			AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64),
+			PATH: `${tempDir}${delimiter}${basePath}`,
 			all_proxy: undefined,
 			http_proxy: undefined,
 			https_proxy: undefined,
@@ -552,7 +563,7 @@ test("agentBrowserExtension applies managed restore policy to every current-sess
 			const probe = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "probe" } });
 			assert.equal(probe.isError, false, JSON.stringify(probe));
 			const invocations = await readInvocationLog(upstreamLogPath) as Array<{ args: string[]; restore?: string | null }>;
-			assert.deepEqual(invocations.map((entry) => entry.args.at(-2)), ["get", "get", "eval", "tab", "snapshot"]);
+			assert.deepEqual(invocations.map((entry) => extractUpstreamCommandTokens(entry.args).at(-2)), ["get", "get", "eval", "tab", "snapshot"]);
 			const restoreKey = createManagedSessionRestoreKey(tempDir, getManagedSessionRestoreScope(opened.details?.sessionName as string));
 			assert.equal(invocations.every((entry) => entry.restore === restoreKey), true);
 
@@ -569,6 +580,7 @@ if (args.includes("session") && args.includes("info")) {
 			assert.match(failedProbe.content[0]?.text ?? "", /Electron probe failed/);
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -593,7 +605,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Read a normal file page." });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const openResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "file:///tmp/normal-browser-fixture.html"], sessionMode: "fresh" });
@@ -606,6 +618,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			assert.equal(probeResult.isError, false, JSON.stringify(probeResult));
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -629,7 +642,7 @@ const data = command === "open"
       : { closed: true };
 process.stdout.write(JSON.stringify({ success: true, data }));`);
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const openResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://fixture.invalid/"] });
@@ -644,6 +657,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 			assert.equal(invocations.length, 5);
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -665,7 +679,7 @@ test("agentBrowserExtension reports Electron session mismatch and launchId-aware
 			tabTitle: "Blank Page",
 			tabUrl: "about:blank",
 		}));
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -747,6 +761,7 @@ test("agentBrowserExtension reports Electron session mismatch and launchId-aware
 		});
 	} finally {
 		await stopTestPid(launchedPid);
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -808,7 +823,7 @@ else if (command === "click") {
 else if (command === "close") write({ closed: true });
 else write({ ok: true, title: currentPage().title, url: currentPage().url });`,
 		);
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const launchResult = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "launch", appPath: app.appPath } });
@@ -861,6 +876,7 @@ else write({ ok: true, title: currentPage().title, url: currentPage().url });`,
 		});
 	} finally {
 		await stopTestPid(launchedPid);
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -899,7 +915,7 @@ setTimeout(() => {
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const connectResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["connect", "9222"] });
@@ -923,6 +939,7 @@ setTimeout(() => {
 			assert.match(probeResult.content[0]?.text ?? "", /Electron probe failed/);
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -978,14 +995,14 @@ if (command === "connect") {
     } }));
   }
 } else if (command === "click") {
-  process.stdout.write(JSON.stringify({ success: true, data: { clicked: args[args.length - 1] } }));
+  process.stdout.write(JSON.stringify({ success: true, data: { clicked: args.find((arg) => /^@e[0-9]+$/.test(arg)) } }));
 } else {
   process.stdout.write(JSON.stringify({ success: true, data: { ok: true } }));
 }`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -1053,10 +1070,11 @@ if (command === "connect") {
 					.filter((command): command is string => command !== undefined),
 				["connect", "snapshot", "snapshot", "snapshot", "snapshot", "click"],
 			);
-			assert.equal(invocations.filter((entry) => entry.args.at(-2) === "click" && entry.args.at(-1) === "@e2").length, 1);
+			assert.equal(invocations.filter((entry) => extractUpstreamCommandTokens(entry.args).at(-2) === "click" && extractUpstreamCommandTokens(entry.args).at(-1) === "@e2").length, 1);
 			assert.equal(invocations.filter((entry) => entry.args.includes("@e1")).length, 0);
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
@@ -1115,14 +1133,14 @@ if (command === "connect") {
 	})));
 	process.exit(1);
 } else if (command === "click") {
-	process.stdout.write(JSON.stringify({ success: true, data: { clicked: args[args.length - 1] } }));
+	process.stdout.write(JSON.stringify({ success: true, data: { clicked: args.find((arg) => /^@e[0-9]+$/.test(arg)) } }));
 } else {
 	process.stdout.write(JSON.stringify({ success: true, data: { ok: true } }));
 }`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -1183,6 +1201,7 @@ if (command === "connect") {
 			assert.equal(invocations.filter((entry) => entry.args.includes("@e2")).length, 1);
 		});
 	} finally {
+		await disposeElectronScriptFixtures();
 		await rm(tempDir, { force: true, recursive: true });
 	}
 });
