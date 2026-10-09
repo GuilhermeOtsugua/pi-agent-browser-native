@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseDogfoodArgs } from "../scripts/verify-agent-browser-dogfood.ts";
+import { cleanupDogfoodRun, parseDogfoodArgs } from "../scripts/verify-agent-browser-dogfood.ts";
 
 test("parseDogfoodArgs accepts artifact, retention, json, and help flags", () => {
 	assert.deepEqual(parseDogfoodArgs(["--artifact-dir", "/tmp/pi-dogfood", "--keep-artifacts", "--json"]), {
@@ -19,6 +19,35 @@ test("parseDogfoodArgs accepts artifact, retention, json, and help flags", () =>
 		keepArtifacts: true,
 	});
 	assert.deepEqual(parseDogfoodArgs(["--help"]), { help: true });
+});
+
+test('dogfood cleanup preserves primary and cleanup failures while settling every resource', async () => {
+	const calls: string[] = [];
+	const primary = new Error('failed smoke step');
+	await assert.rejects(cleanupDogfoodRun({
+		removeOwnedArtifacts: async () => { calls.push('artifacts'); },
+		closeFixture: async () => { calls.push('fixture'); throw new Error('fixture error'); },
+		shutdown: async () => { calls.push('shutdown'); throw new Error('shutdown error'); },
+		closeSession: async () => { calls.push('close'); throw new Error('close error'); },
+	}, primary), (error: unknown) => {
+		assert.ok(error instanceof AggregateError);
+		assert.equal(error.errors[0], primary);
+		assert.equal(error.errors.length, 4);
+		assert.match(error.message, /failed smoke step/);
+		assert.match(error.message, /shutdown error/);
+		return true;
+	});
+	assert.deepEqual(calls, ['close', 'shutdown', 'fixture', 'artifacts']);
+});
+
+test('successful dogfood cleanup omits recovery close and caller-owned artifact removal', async () => {
+	const calls: string[] = [];
+	await cleanupDogfoodRun({ shutdown: async () => { calls.push('shutdown'); }, closeFixture: async () => { calls.push('fixture'); } });
+	assert.deepEqual(calls, ['shutdown', 'fixture']);
+});
+
+test('dogfood cleanup does not replace an existing failure when teardown succeeds', async () => {
+	await cleanupDogfoodRun({ shutdown: async () => {}, closeFixture: async () => {} }, new Error('original'));
 });
 
 test("parseDogfoodArgs rejects unknown options and missing artifact directory values", () => {

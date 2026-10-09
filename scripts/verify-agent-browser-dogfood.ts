@@ -177,6 +177,25 @@ async function assertSuccessfulStep(options: {
 	};
 }
 
+export async function cleanupDogfoodRun(actions: {
+	closeSession?: () => Promise<void>;
+	shutdown: () => Promise<void>;
+	closeFixture: () => Promise<void>;
+	removeOwnedArtifacts?: () => Promise<void>;
+}, primaryFailure?: unknown): Promise<void> {
+	const failures: unknown[] = [];
+	for (const label of ['closeSession', 'shutdown', 'closeFixture', 'removeOwnedArtifacts'] as const) {
+		const action = actions[label];
+		if (!action) continue;
+		try { await action(); }
+		catch (error) { failures.push(new Error(`Dogfood ${label} failed: ${String(error)}`, { cause: error })); }
+	}
+	if (failures.length > 0) {
+		if (primaryFailure !== undefined) failures.unshift(primaryFailure);
+		throw new AggregateError(failures, `Dogfood cleanup failed: ${failures.map(String).join('; ')}`);
+	}
+}
+
 export async function runAgentBrowserDogfood(options: DogfoodOptions = {}): Promise<DogfoodStepReport[]> {
 	const cwd = options.cwd ?? process.cwd();
 	const artifactDir = resolve(options.artifactDir ?? await mkdtemp(join(tmpdir(), "pi-agent-browser-dogfood-")));
@@ -187,6 +206,7 @@ export async function runAgentBrowserDogfood(options: DogfoodOptions = {}): Prom
 	const fixture = await startDogfoodFixture();
 	const reports: DogfoodStepReport[] = [];
 	let closed = false;
+	let primaryFailure: unknown;
 
 	try {
 		await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
@@ -274,15 +294,19 @@ emit(values);`,
 		closed = closeResult.isError !== true;
 		reports.push(await assertSuccessfulStep({ id: "close-session", result: closeResult, textPattern: /closed/ }));
 		return reports;
+	} catch (error) {
+		primaryFailure = error;
+		throw error;
 	} finally {
-		if (!closed) {
-			await executeRegisteredTool(harness.tool, harness.ctx, { args: ["close"] }).catch(() => undefined);
-		}
-		await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx).catch(() => undefined);
-		await fixture.close();
-		if (shouldRemoveArtifacts) {
-			await rm(artifactDir, { force: true, recursive: true });
-		}
+		await cleanupDogfoodRun({
+			closeSession: closed ? undefined : async () => {
+				const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: ['close'] });
+				assert.equal(result.isError, false, `Dogfood recovery close failed: ${result.content[0]?.type === 'text' ? result.content[0].text : ''}`);
+			},
+			shutdown: async () => { await runExtensionEvent(harness.handlers, 'session_shutdown', { reason: 'quit' }, harness.ctx); },
+			closeFixture: fixture.close,
+			removeOwnedArtifacts: shouldRemoveArtifacts ? async () => { await rm(artifactDir, { force: true, recursive: true }); } : undefined,
+		}, primaryFailure);
 	}
 }
 
