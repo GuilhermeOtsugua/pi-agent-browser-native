@@ -6,10 +6,12 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { once } from "node:events";
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import {
 	acquireManagedSessionPolicyLock,
@@ -125,6 +127,73 @@ test("managed session policy lock serializes concurrent contenders", async () =>
 	assert.equal(maxActive, 1);
 	assert.deepEqual(await claimPaths(), []);
 });
+
+for (const code of ['EPERM', 'EBUSY']) {
+	test(`managed session policy lock retries transient Windows ${code} release`, { skip: process.platform !== 'win32' }, async () => {
+		const lock = await acquireManagedSessionPolicyLock({ sessionName });
+		assert.ok(lock);
+		const path = await onlyClaimPath();
+		const rename = fs.rename;
+		let failures = 0;
+		const mocked = mock.method(fs, 'rename', async (from: Parameters<typeof fs.rename>[0], to: Parameters<typeof fs.rename>[1]) => {
+			if (from === path && failures++ === 0) throw Object.assign(new Error('transient sharing conflict'), { code });
+			return await rename(from, to);
+		});
+		syncBuiltinESMExports();
+		try {
+			await lock.release();
+			assert.deepEqual(await claimPaths(), []);
+			assert.equal(failures, 2);
+		} finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+	});
+}
+
+test('managed session policy lock revalidates ownership after a Windows sharing conflict', { skip: process.platform !== 'win32' }, async () => {
+	const lock = await acquireManagedSessionPolicyLock({ sessionName });
+	assert.ok(lock);
+	const path = await onlyClaimPath();
+	const ownerPath = join(path, 'owner.json');
+	const replacement = JSON.stringify({ ...JSON.parse(await readFile(ownerPath, 'utf8')), token: 'replacement-token' });
+	const rename = fs.rename;
+	let attempts = 0;
+	const mocked = mock.method(fs, 'rename', async (from: Parameters<typeof fs.rename>[0], to: Parameters<typeof fs.rename>[1]) => {
+		if (from === path) {
+			attempts++;
+			await writeFile(ownerPath, replacement);
+			throw Object.assign(new Error('sharing conflict with replaced owner'), { code: 'EPERM' });
+		}
+		return await rename(from, to);
+	});
+	syncBuiltinESMExports();
+	try {
+		await lock.release();
+		assert.equal(attempts, 1);
+		assert.equal(await readFile(ownerPath, 'utf8'), replacement);
+	} finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+});
+
+for (const [code, expectedAttempts] of [['EPERM', 4], ['EACCES', 1]] as const) {
+	test(`managed session policy lock leaves persistent ${code} release failures owned`, { skip: process.platform !== 'win32' }, async () => {
+		const lock = await acquireManagedSessionPolicyLock({ sessionName });
+		assert.ok(lock);
+		const path = await onlyClaimPath();
+		const owner = await readFile(join(path, 'owner.json'), 'utf8');
+		const rename = fs.rename;
+		let attempts = 0;
+		const mocked = mock.method(fs, 'rename', async (from: Parameters<typeof fs.rename>[0], to: Parameters<typeof fs.rename>[1]) => {
+			if (from === path) { attempts++; throw Object.assign(new Error('persistent conflict'), { code }); }
+			return await rename(from, to);
+		});
+		syncBuiltinESMExports();
+		try {
+			await lock.release();
+			assert.equal(attempts, expectedAttempts);
+			assert.equal(await readFile(join(path, 'owner.json'), 'utf8'), owner);
+		} finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+		await lock.release();
+		assert.deepEqual(await claimPaths(), []);
+	});
+}
 
 test("managed session policy lock excludes a live owner in another process", async () => {
 	const moduleUrl = new URL("../extensions/agent-browser/lib/managed-session-policy-lock.ts", import.meta.url).href;

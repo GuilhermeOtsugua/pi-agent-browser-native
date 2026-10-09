@@ -170,13 +170,21 @@ async function ownerAlive(owner: PolicyLockOwner): Promise<boolean | undefined> 
 }
 
 async function removeClaimOwnedBy(path: string, token: string): Promise<boolean> {
-	const current = await readClaim(path);
-	if (current?.owner.token !== token) return false;
 	const movedPath = join(dirname(path), `.pi-agent-browser-policy-remove-${token}-${randomUUID()}`);
-	try {
-		await rename(path, movedPath);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "ENOENT";
+	for (let attempt = 0; ; attempt++) {
+		const current = await readClaim(path);
+		if (current?.owner.token !== token) return false;
+		try {
+			await rename(path, movedPath);
+			break;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === 'ENOENT') return true;
+			// Concurrent claim readers can briefly prevent directory renames on Windows.
+			// Retry only sharing conflicts, with fresh ownership evidence every time.
+			if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EBUSY') || attempt >= 3) return false;
+			await waitForRetry();
+		}
 	}
 	const moved = await readClaim(movedPath);
 	if (moved?.owner.token !== token) {
