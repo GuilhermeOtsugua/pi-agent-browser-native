@@ -27,7 +27,12 @@ import type { TSchema } from "typebox";
 
 import agentBrowserExtension from "../../extensions/agent-browser/index.js";
 import { TARGET_AGENT_BROWSER_VERSION_LABEL } from "../../scripts/agent-browser-target.mjs";
-import { registerNativeCliFixture } from "./native-cli-spawn-fixture.js";
+
+// Node's test runner loads this module before test callbacks, so register adapter
+// cleanup on the root context. Live dogfood must not bootstrap node:test at all.
+const nativeCliFixtures = process.env.NODE_TEST_CONTEXT
+	? await import('./native-cli-spawn-fixture.js')
+	: undefined;
 
 export const TEST_SESSION_ID = "12345678-1234-5678-9abc-def012345678";
 export const DOWNLOAD_FIXTURE_CONTENT = "download contract fixture report\n";
@@ -607,7 +612,10 @@ if (process.env.PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO !== "1" && __piabFakeA
 			await mkdir(dirname(nativePath), { recursive: true });
 			await writeFile(nativePath, "test-only native CLI placeholder\n", "utf8");
 			// A simulated layout on POSIX must not install a live spawn mock.
-			if (processPlatform === "win32") registerNativeCliFixture(nativePath, scriptPath);
+			if (processPlatform === "win32") {
+				const { registerNativeCliFixture } = nativeCliFixtures ?? await import('./native-cli-spawn-fixture.js');
+				registerNativeCliFixture(nativePath, scriptPath);
+			}
 		}
 		return launcherPath;
 	}
