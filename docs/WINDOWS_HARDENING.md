@@ -1,6 +1,6 @@
 # Windows lifecycle and restore hardening
 
-Historical bounded pass. See [current contracts and remaining gaps](REMAINING_GAPS.md) for the subsequent Job Object cancellation repair, native fixture/CLI fixes and the latest non-green full gate. The tree-ordering repair below was superseded; it is not complete cancellation certification.
+Historical bounded pass. See [current contracts and remaining gaps](REMAINING_GAPS.md) for the subsequent Job Object cancellation repair, native fixture/CLI fixes and the current repeated passing Windows gates and remaining upstream/platform gaps. The tree-ordering repair below was superseded; it is not complete cancellation certification.
 
 Validated 8 October 2026 with Node 24.0.2 on native Windows. This is a bounded repair pass, not a release-gate or all-platform certification.
 
@@ -56,7 +56,7 @@ After `npm run build`:
 npx tsx --test --test-concurrency=1 test/agent-browser.argv-descriptor.test.ts test/agent-browser.extension-errors-artifacts.test.ts test/agent-browser.presentation.test.ts test/agent-browser.script.test.ts test/agent-browser.navigation-transport.test.ts test/agent-browser.wait-timeouts.test.ts test/agent-browser.windows-lifecycle.test.ts
 ```
 
-Diagnostic expansion, currently non-green on the tested Windows installation:
+Historical diagnostic expansion, then non-green on the tested Windows installation:
 
 ```sh
 npx tsx --test --test-concurrency=1 test/agent-browser.process.test.ts test/agent-browser.managed-session-restore.test.ts
