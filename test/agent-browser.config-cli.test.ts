@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -31,6 +31,7 @@ function npmLauncher(): { command: string; args: string[] } {
 }
 
 async function runProcess(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; label?: string } = {}) {
+	const started = performance.now();
 	return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
 		const child = spawn(command, args, {
 			cwd: options.cwd ?? process.cwd(),
@@ -48,12 +49,15 @@ async function runProcess(command: string, args: string[], options: { cwd?: stri
 		child.stderr.on("data", (chunk: string) => {
 			stderr += chunk;
 		});
-		child.on("error", reject);
-		child.on("close", (code) => {
+		let exitElapsedMs: number | undefined;
+		child.once("exit", () => { exitElapsedMs = performance.now() - started; });
+		child.on("error", (error) => reject(Object.assign(error, { stdout, stderr, elapsedMs: performance.now() - started })));
+		child.on("close", (code, signal) => {
 			if (code === 0) {
 				resolve({ stdout, stderr });
 			} else {
-				reject(Object.assign(new Error(`${options.label ?? command} exited with ${code ?? "unknown"}`), { code, stdout, stderr }));
+				const elapsedMs = performance.now() - started;
+				reject(Object.assign(new Error(`${options.label ?? command}: code=${code}, signal=${signal}, elapsedMs=${elapsedMs.toFixed(3)}, deadlineMs=20000, killSent=${child.killed}, exitElapsedMs=${exitElapsedMs?.toFixed(3) ?? "unobserved"}`), { code, signal, elapsedMs, stdout, stderr }));
 			}
 		});
 		child.stdin.end(options.input ?? "");
@@ -91,6 +95,31 @@ async function createFixture() {
 		projectPath: join(cwd, ".pi", "config", "pi-agent-browser-native", "config.json"),
 		root,
 	};
+}
+
+// Keep only bounded, redacted log tails in the assertion error; fixture cleanup
+// still owns the raw npm cache/logs, including on failure. Never retain config files.
+async function npmFailureDiagnostics(cache: string, secret: string): Promise<string> {
+	const redact = (text: string) => text.split(secret).join("[redacted]");
+	try {
+		const logs = join(cache, "_logs");
+		const names = (await readdir(logs)).filter((name) => name.endsWith("-debug-0.log")).sort().slice(-2);
+		const tails: string[] = [];
+		for (const name of names) {
+			const file = await open(join(logs, name), "r");
+			try {
+				const size = (await file.stat()).size;
+				const buffer = Buffer.alloc(Math.min(size, 8192));
+				const { bytesRead } = await file.read(buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+				tails.push(`${name} (last ${bytesRead}/${size} bytes):\n${redact(buffer.subarray(0, bytesRead).toString("utf8"))}`);
+			} finally {
+				await file.close();
+			}
+		}
+		return tails.join("\n") || "no npm debug logs";
+	} catch (error) {
+		return `npm debug logs unavailable: ${(error as NodeJS.ErrnoException).code ?? "read failure"}`;
+	}
 }
 
 async function collectMarkdownFiles(root: string): Promise<string[]> {
@@ -152,6 +181,33 @@ function documentedNpmExecArgs(command: string, localPackageSpec: string): { arg
 	tokens[packageIndex + 1] = localPackageSpec;
 	return { args: [...tokens.slice(1, 2), "--offline", "--ignore-scripts", ...tokens.slice(2)], input };
 }
+
+test("npm fixture failure diagnostics retain bounded redacted log tails", async () => {
+	const fixture = await createFixture();
+	const logs = join(fixture.env.NPM_CONFIG_CACHE, "_logs");
+	await mkdir(logs, { recursive: true });
+	await writeFile(join(logs, "001-debug-0.log"), "old log must be omitted");
+	await writeFile(join(logs, "002-debug-0.log"), "x".repeat(20_000) + " doc-secret-exa-key");
+	await writeFile(join(logs, "003-debug-0.log"), "last stage: bin execution doc-secret-exa-key");
+	const diagnostics = await npmFailureDiagnostics(fixture.env.NPM_CONFIG_CACHE, "doc-secret-exa-key");
+	assert.doesNotMatch(diagnostics, /old log|doc-secret-exa-key/);
+	assert.match(diagnostics, /last stage: bin execution \[redacted\]/);
+	assert.match(diagnostics, /last 8192\/20019 bytes/);
+	assert.ok(diagnostics.length < 17_000);
+	assert.equal(await npmFailureDiagnostics(join(fixture.root, "missing-cache"), "doc-secret-exa-key"), "npm debug logs unavailable: ENOENT");
+});
+
+test("fixture process failures distinguish exit code and signal with elapsed time", async () => {
+	await assert.rejects(() => runProcess(process.execPath, ["-e", "process.stdout.write('stage marker'); process.exit(7)"], { label: "fixture probe" }),
+		(error: Error & { code?: number; signal?: string | null; stdout?: string; elapsedMs?: number }) => {
+			assert.equal(error.code, 7);
+			assert.equal(error.signal, null);
+			assert.equal(error.stdout, "stage marker");
+			assert.ok((error.elapsedMs ?? 0) > 0);
+			assert.match(error.message, /fixture probe: code=7, signal=null, elapsedMs=[\d.]+, deadlineMs=20000, killSent=false, exitElapsedMs=[\d.]+/);
+			return true;
+		});
+});
 
 test("config CLI prints Pi-scoped paths and pass-through setup help", async () => {
 	const fixture = await createFixture();
@@ -233,7 +289,14 @@ test("documented npm-exec package config examples execute against an isolated co
 			cwd: fixture.cwd,
 			env: { ...fixture.env, EXA_API_KEY: "doc-secret-exa-key" },
 			input,
-			label: `${path} documented npm-exec config example`,
+			label: `${path} documented npm-exec config example: ${command}`,
+		}).catch(async (error: Error & { stdout?: string; stderr?: string }) => {
+			const redact = (text: string) => text.replaceAll("doc-secret-exa-key", "[redacted]");
+			error.stdout = redact(error.stdout ?? "").slice(-4096);
+			error.stderr = redact(error.stderr ?? "").slice(-4096);
+			error.message = redact(error.message) + `\nstdout tail: ${error.stdout}\nstderr tail: ${error.stderr}\n` +
+				await npmFailureDiagnostics(fixture.env.NPM_CONFIG_CACHE, "doc-secret-exa-key");
+			throw error;
 		});
 		assert.notEqual(stdout.trim(), "");
 		assert.doesNotMatch(stdout + stderr, /doc-secret-exa-key/);
