@@ -61,9 +61,10 @@ import {
 	runAgentBrowserScript,
 	type AgentBrowserScriptRunResult,
 } from "./lib/input-modes/script.js";
-import { closeManagedSession, getSessionContextKey, runAgentBrowserTool, type AgentBrowserToolResult, type BrowserRunState, type TraceOwner } from "./lib/orchestration/browser-run/index.js";
+import type { AgentBrowserToolResult, BrowserRunState, TraceOwner } from "./lib/orchestration/browser-run/types.js";
+import { closeManagedSession } from "./lib/orchestration/browser-run/managed-session-daemon-policy.js";
 import { canonicalizeExplicitArtifactDestination, getExplicitArtifactDestination } from "./lib/orchestration/browser-run/artifact-paths.js";
-import { findElectronLaunchRecordForSession, getActiveElectronRecords } from "./lib/orchestration/browser-run/session-state.js";
+import { findElectronLaunchRecordForSession, getActiveElectronRecords, getSessionContextKey } from "./lib/orchestration/browser-run/session-state.js";
 import { parseBatchCommandArgument, parseUserBatchStdin } from "./lib/orchestration/batch-stdin.js";
 import {
 	ELECTRON_POST_COMMAND_STATUS_SETTLE_MS,
@@ -1765,6 +1766,9 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 					? undefined
 					: callerOwnedSessionQueueKey ?? getSessionContextKey(browserRunState.managedSessionName, browserRunState.managedSessionNamespace);
 				const attachedSessionKnown = reusableSessionKey !== undefined && attachedSessionKeys.has(reusableSessionKey);
+				// Demand-load execution phases inside the existing queue, after capturing
+				// branch generations so restore during import still invalidates this call.
+				const { runAgentBrowserTool } = await import("./lib/orchestration/browser-run/index.js");
 				let result = await runAgentBrowserTool({
 					ctx,
 					cwd: ctx.cwd,
