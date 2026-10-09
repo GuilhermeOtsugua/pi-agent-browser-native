@@ -264,6 +264,8 @@ test("publish contract derives required packed files from package.json", async (
 	assert.equal(publishContract.forbiddenPackedFiles.includes(".pi/extensions/agent-browser.ts"), true);
 	assert.equal(publishContract.requiredPackedFiles.includes("package.json"), true);
 	assert.equal(publishContract.requiredPackedFiles.includes("scripts/doctor.mjs"), true);
+	assert.equal(publishContract.requiredPackedFiles.includes('scripts/lib/agent-browser-executable.mjs'), true);
+	assert.equal(publishContract.requiredPackedFiles.includes('extensions/agent-browser/lib/windows-native-launcher.js'), true);
 	assert.equal(publishContract.requiredPackedFiles.includes("scripts/prepare.mjs"), true);
 	assert.equal(publishContract.requiredPackedFiles.includes("scripts/agent-browser-capability-baseline.mjs"), true);
 	assert.equal(publishContract.requiredPackedFiles.includes("docs/COMMAND_REFERENCE.md"), true);

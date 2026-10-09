@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { resolveCommandReferenceExecutable } from '../scripts/verify-command-reference.mjs';
+import { resolveAgentBrowserExecutable } from '../scripts/lib/agent-browser-executable.mjs';
 
 test('command reference uses the first Windows package-owned launcher, not a later standalone copy', async () => {
  const root=await mkdtemp(join(tmpdir(),'pi-command-launcher-'));
@@ -15,14 +15,14 @@ test('command reference uses the first Windows package-owned launcher, not a lat
   await writeFile(join(first,'agent-browser.cmd'),'fixture');
   await writeFile(binary,'fixture');
   await writeFile(join(later,'agent-browser.exe'),'fixture');
-  assert.equal(await resolveCommandReferenceExecutable('win32',`${first};${later}`),binary);
+  assert.equal(await resolveAgentBrowserExecutable('win32',`${first};${later}`),binary);
   await rm(binary);
-  await assert.rejects(resolveCommandReferenceExecutable('win32',`${first};${later}`),/first PATH/);
+  await assert.rejects(resolveAgentBrowserExecutable('win32',`${first};${later}`),/first PATH/);
   await writeFile(join(first,'agent-browser.exe'),'fixture');
-  assert.equal(await resolveCommandReferenceExecutable('win32',`${first};${later}`),join(first,'agent-browser.exe'));
+  assert.equal(await resolveAgentBrowserExecutable('win32',`${first};${later}`),join(first,'agent-browser.exe'));
  } finally {await rm(root,{recursive:true,force:true});}
 });
 
 test('command reference retains POSIX PATH execution', async () => {
- assert.equal(await resolveCommandReferenceExecutable('linux',''), 'agent-browser');
+ assert.equal(await resolveAgentBrowserExecutable('linux',''), 'agent-browser');
 });

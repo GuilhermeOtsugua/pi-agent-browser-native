@@ -18,6 +18,8 @@ import { promisify } from "node:util";
 import { CAPABILITY_BASELINE_SOURCE } from "./agent-browser-capability-baseline.mjs";
 import { MINIMUM_AGENT_BROWSER_VERSION, TARGET_AGENT_BROWSER_SOURCE, TARGET_AGENT_BROWSER_VERSION, isSupportedAgentBrowserVersion } from "./agent-browser-target.mjs";
 
+import { resolveAgentBrowserExecutable } from './lib/agent-browser-executable.mjs';
+
 const execFile = promisify(execFileCallback);
 const PACKAGE_NAME = "pi-agent-browser-native";
 const REPO_URL_FRAGMENT = "github.com/fitchmultz/pi-agent-browser-native";
@@ -124,7 +126,8 @@ export function parseCliArgs(argv = process.argv.slice(2)) {
 }
 
 async function defaultRunAgentBrowser(args) {
-	const { stdout, stderr } = await execFile("agent-browser", args, { maxBuffer: 1024 * 1024 });
+	const file = await resolveAgentBrowserExecutable();
+	const { stdout, stderr } = await execFile(file, args, { maxBuffer: 1024 * 1024 });
 	return `${stdout}${stderr}`;
 }
 

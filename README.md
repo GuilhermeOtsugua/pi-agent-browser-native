@@ -186,6 +186,8 @@ The doctor checks:
 - `pi --version` meets the minimum Pi runtime floor for this release; older Pi versions are setup failures
 - Pi settings do not point at multiple active `pi-agent-browser-native` sources
 
+On Windows, the doctor and command-reference verifier use the same first-PATH native launcher resolution as the tool. Standard npm shims resolve to their package-owned executable, preserving bundled skill discovery; checks must not silently select a later standalone copy. A custom shim without that native layout remains a maintainer-check setup blocker, not a reason to inspect another installation. Runtime custom-shim support is unchanged.
+
 It does **not** edit Pi settings and does **not** run upstream `agent-browser doctor --fix`.
 
 Pi hosts that run as uid 0 should set `PI_AGENT_BROWSER_SOCKET_DIR` to a short absolute directory under private root-owned ancestry, create it with mode `0700`, and keep it owned by the Pi user. The extension validates that directory and forwards it as upstream `AGENT_BROWSER_SOCKET_DIR`; ambient upstream socket overrides remain ignored.

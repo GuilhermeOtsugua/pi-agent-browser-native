@@ -35,6 +35,8 @@
     "platform-smoke.config.mjs",
     "scripts/config.mjs",
     "scripts/doctor.mjs",
+    "scripts/lib",
+    "extensions/agent-browser/lib/windows-native-launcher.js",
     "scripts/prepare.mjs",
     "scripts/build.mjs",
     "scripts/agent-browser-capability-baseline.mjs",
