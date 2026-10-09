@@ -17,6 +17,7 @@
     ".pi/extensions/**/*.ts",
     "extensions/**/*.ts",
     "extensions/agent-browser/lib/config-policy.js",
+    "extensions/agent-browser/lib/windows-native-launcher.js",
     "test/**/*.ts"
   ]
 }

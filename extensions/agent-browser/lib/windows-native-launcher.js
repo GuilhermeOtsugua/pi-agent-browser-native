@@ -1,9 +1,11 @@
+// @ts-check
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
-async function isFile(path: string): Promise<boolean> {
+/** @param {string} path */
+async function isFile(path) {
 	try { return (await stat(path)).isFile(); } catch (error) {
-		if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+		if (["ENOENT", "ENOTDIR"].includes(/** @type {NodeJS.ErrnoException} */ (error).code ?? "")) return false;
 		throw error;
 	}
 }
@@ -11,8 +13,10 @@ async function isFile(path: string): Promise<boolean> {
 /** Resolve the first PATH installation, not a later executable of a different version.
  * Standard npm shims have a sibling package-owned native binary. Custom shims
  * retain the existing PowerShell path instead of silently selecting another install.
+ * @param {string | undefined} path
+ * @param {string} [arch]
  */
-export async function resolveWindowsNativeLauncher(path: string | undefined, arch: string = process.arch): Promise<string | undefined> {
+export async function resolveWindowsNativeLauncher(path, arch = process.arch) {
 	if (!path || !["x64", "arm64"].includes(arch)) return undefined;
 	for (const entry of path.split(";")) {
 		const directory = entry.trim().replace(/^"(.*)"$/, "$1");

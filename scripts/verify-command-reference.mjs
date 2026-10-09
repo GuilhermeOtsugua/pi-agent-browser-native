@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { isDirectRun } from './lib/direct-run.mjs';
+import { resolveWindowsNativeLauncher } from '../extensions/agent-browser/lib/windows-native-launcher.js';
 
 import {
   CAPABILITY_BASELINE,
@@ -65,9 +66,17 @@ Exit codes:
 `);
 }
 
+export async function resolveCommandReferenceExecutable(platform = process.platform, path = process.env.PATH) {
+  if (platform !== 'win32') return 'agent-browser';
+  const native = await resolveWindowsNativeLauncher(path);
+  if (!native) throw new Error('Cannot resolve the first PATH agent-browser install to its native executable. Use a standard npm install or agent-browser.exe first on PATH; verification must not select a later install.');
+  return native;
+}
+
 async function runAgentBrowser(args) {
   try {
-    const { stdout, stderr } = await execFile("agent-browser", args, { maxBuffer: 10 * 1024 * 1024 });
+    const file = await resolveCommandReferenceExecutable();
+    const { stdout, stderr } = await execFile(file, args, { maxBuffer: 10 * 1024 * 1024 });
     return `${stdout}${stderr}`;
   } catch (error) {
     throw new Error(
