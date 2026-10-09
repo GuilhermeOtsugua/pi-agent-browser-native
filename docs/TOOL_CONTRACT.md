@@ -208,6 +208,8 @@ Upstream 0.35.2 adds `dashboard start --allowed-origins <origins>` and `AGENT_BR
 - Do not call --help or other exploratory inspection commands unless the user explicitly asks for them or debugging the browser integration is necessary.
 <!-- agent-browser-playbook:end shared-guidelines -->
 
+**Close acknowledgement and process lifetime:** a successful close is not an OS daemon-exit guarantee. In the tested upstream 0.36.0, [daemon connection handling](https://github.com/vercel-labs/agent-browser/blob/v0.36.0/cli/src/native/daemon.rs) writes the response, then waits 100 ms before notifying graceful shutdown. Automation disposing an ephemeral working directory must establish its owned process's exit rather than infer it from the response or missing sidecars, or add an arbitrary fixed sleep. This does not change wrapper timeout/cancellation guarantees or authorize killing unverified processes.
+
 ## Parameters
 
 Illustrative shapes (each real call uses exactly one of `script`, `args`, `semanticAction`, `job`, `qa`, `sourceLookup`, `networkSourceLookup`, or `electron`):
