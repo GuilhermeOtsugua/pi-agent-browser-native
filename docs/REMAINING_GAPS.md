@@ -1,6 +1,6 @@
 # Windows contracts and remaining gaps
 
-Validated 8 October 2026 with Node 24.0.2 on native Windows. This report supersedes the earlier open-fixture dispositions, not their historical measurements. It is not a full release certification.
+Updated 9 October 2026 with Node 24.0.2 on native Windows. This report supersedes earlier open-fixture/cancellation dispositions, not their historical measurements. The complete default gate remains non-green; this is not release certification.
 
 ## Completed stages
 
@@ -20,7 +20,7 @@ Fixtures use bounded native subprocesses, isolated home/npm settings and an offl
 
 **25 focused tests passed, zero failures/skips.** Build, TypeScript and generated-doc checks passed. POSIX execution of these changes was not measured here.
 
-## New observed cancellation defect — unresolved
+## Historical cancellation defect — repaired in tested scope
 
 The combined 12-file verification completed with **177 passed, one failed, ten platform skips**, 265.09 seconds. The failure was `EBUSY` removing a 100 ms watchdog fixture directory.
 
@@ -33,7 +33,7 @@ Independent PID/process inspection reproduced a substantive race, not merely an 
 
 The earlier repair stopped explicitly killing the parent before tree traversal. It did not make taskkill's process-tree snapshot atomic with future child creation. At a short deadline the PowerShell launcher can start a `.cmd`/Node descendant after traversal has selected its targets. A successful taskkill status and direct-parent exit therefore do not prove descendant disappearance. Increasing rm retries or startup timeouts would hide this defect, not repair it.
 
-The measured scope is the PowerShell/custom-shim fallback. The standard package-owned native executable route was **not** established to have the same race. A production fix needs an evidence-led OS-owned process-lifetime contract; no speculative process framework, guessed-PID killing or upstream bundle was introduced.
+The measured scope was the PowerShell/custom-shim fallback. `90f7efb` now places the launcher in a non-inheritable kill-on-close Windows Job Object before external execution. Forced launcher termination closes the sole handle and kills members, including children created during cancellation. Normal completion clears kill-on-close so intentionally detached descendants survive CLI exit 0 or 7. Active-descendant regressions and two ten-run 100 ms fake-only watchdog checks passed with no survivors/cleanup errors. Short samples often stop before a CLI PID exists, so those samples alone are not active-child proof. The standard native route was not established to have the original race. No guessed-PID killing or upstream binary bundle was introduced.
 
 Reproduce after installing dependencies (fake CLI only; no browser/HTTP/model work):
 
@@ -45,7 +45,19 @@ The diagnostic is Windows-only and bounded to 1–20 runs. It exits nonzero for 
 
 ## Broader gates and upstream transport
 
-The attempted full default unit run stopped at its 650-second caller limit, with **120 pass lines and 42 fail lines**, no final summary. Nine config and one clipboard failures were subsequently reproduced and verified repaired separately. Other failures include Electron/platform fixtures, semantic-action/QA matrices, recovery and command/artifact coverage. They remain individually undispositioned; do not classify them all as harmless fixtures or new runtime regressions. No full-suite-green claim is supported.
+Complete Windows default-unit measurements (different test revisions, not paired performance benchmarks):
+
+| Revision/run | Passed | Failed | Skipped | Duration |
+|---|---:|---:|---:|---:|
+| First complete gate | 753 | 68 | 13 | 2,002.306 s |
+| Standard-native fixtures | 814 | 9 | 15 | 614.687 s |
+| Final repair gate | **826** | **2** | **16** | **614.796 s** |
+
+The final 844-test run had zero cancellations. It retains two failures: eight same-process lock contenders at the unchanged 1 s budget leave a residual owned claim, and fresh sequential cold imports measured **272.6, 243.2, 230.9 ms**, exceeding the unchanged **250 ms** budget. Contention diagnostics are retained; no speculative reclaim or timeout relaxation was used to hide that failure. Independent cross-process serialization passes with an explicit Windows fixture-only 10 s budget (four Node/tsx processes and uncached PowerShell identity observations); this is not proof the production 1 s policy meets that workload.
+
+Completed follow-ups include OS-owned shim lifetime/literal argv, restored Electron CIM ownership checks, implicit abandoned-launch shutdown tracking, native ref-guard/input-mode fixtures, and exact-path standard-native Node spawn adapters with real child cleanup. Source/file URL and ffmpeg fixtures are repaired. `fc9c007` makes the requested Electron probe deadline authoritative, preserving cancellation/attachment assertions.
+
+`74dd747` repaired three maintainer CLI file-URL guards that silently skipped execution on Windows. Consequently earlier apparent generated-baseline/startup-profile successes are superseded: the real startup profile fails at **295.7 ms**; generated-doc checks now execute and pass, with LF/CRLF read-only/drift-repair tests. Build/typecheck pass. The independently executed **live command-reference gate fails** at `agent-browser skills list`: upstream reports a missing skills directory. The default gate stops at unit failure and does not certify later stages. The native fixture speedup is not live browser-performance proof; POSIX remains unexecuted.
 
 The installed CLI doctor reported 0.36.0 and a successful headless about:blank launch. This is a health observation, not an EOF repair, configured-source reload, authentication/restore check or release matrix.
 
@@ -53,10 +65,13 @@ Official [upstream v0.36.0 connection source](https://raw.githubusercontent.com/
 
 ## Priority queue
 
-- **P1:** repair the reproduced short-watchdog ownership/cancellation race without weakening disappearance assertions.
-- **P1:** disposition the remaining default-suite failures; validate the complete gate, POSIX/platform matrix and configured-source reload/restore. tmux dogfood remains unavailable here.
-- **P1:** correlate upstream EOF with daemon logs and transport acknowledgements; keep unknown outcomes failed/uncertain.
-- **P2:** maintainer build orchestration still emits Node DEP0190 for shell-argument spawning; this pass did not rewrite that runner.
-- **P2:** running Pi must `/reload` or restart to activate rebuilt extension code. Windows restore still requires a valid explicit encryption key; no real key/security configuration was changed.
+- **P1:** diagnose same-process lock contention/residual claim without weakening ownership, stale-reclaim or deadline assertions.
+- **P1:** meet the unchanged cold-start budget through measured implementation improvement; do not raise the threshold.
+- **P1:** resolve the independently observed upstream missing-skills command-reference failure; validate the full default/release/POSIX matrix.
+- **P1:** failed browser launch shutdown remains upstream-limited: native `close` can retry the invalid browser and fail. Ownership tracking is repaired, not daemon shutdown certification.
+- **P1:** correlate upstream EOF with daemon logs/acknowledgements; keep unknown outcomes failed/uncertain.
+- **P2:** eight model-free Chrome source-smoke steps and a 10,797-byte screenshot passed, but private-home `EBUSY` made the runner exit 1. This is not clean end-to-end dogfood or configured-source reload/restore. tmux dogfood remains uncertified.
+- **P2:** `c8e58aa` removed maintainer Node-tool shell spawning; warnings from other subprocesses are separate. POSIX-bit subtests skip Windows explicitly; no NTFS ACL/privacy assurance follows.
+- **P2:** running Pi must `/reload` or restart to activate rebuilt code. Windows restore still needs a valid explicit encryption key; no real key/security configuration was changed.
 
 All completed stages were committed locally. No follow-up push or issue closure was performed. Benchmark evidence is software execution/fixture coverage, not new jobs, completed forms or submissions.

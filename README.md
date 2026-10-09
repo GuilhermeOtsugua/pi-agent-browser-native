@@ -649,7 +649,7 @@ For setup that must happen before first navigation, open a blank fresh page, sta
 
 ## Proof and verification
 
-[Windows lifecycle/restore hardening](docs/WINDOWS_HARDENING.md) records the historical bounded pass. [Current contracts and remaining gaps](docs/REMAINING_GAPS.md) covers the later config/fixture repairs and the reproduced short-watchdog cancellation race; neither is full release certification.
+[Windows lifecycle/restore hardening](docs/WINDOWS_HARDENING.md) records the historical bounded pass. [Current contracts and remaining gaps](docs/REMAINING_GAPS.md) covers the subsequent Job Object cancellation repair, Windows CLI/fixture fixes and the latest non-green default gate; neither is full release certification.
 
 `npm run docs` checks that generated playbook fragments and command-reference baseline blocks match their canonical sources (`extensions/agent-browser/lib/playbook.ts` and `scripts/agent-browser-capability-baseline.mjs`) without invoking upstream `agent-browser`.
 
