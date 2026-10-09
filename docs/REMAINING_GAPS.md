@@ -51,13 +51,19 @@ Complete Windows default-unit measurements (different test revisions, not paired
 |---|---:|---:|---:|---:|
 | First complete gate | 753 | 68 | 13 | 2,002.306 s |
 | Standard-native fixtures | 814 | 9 | 15 | 614.687 s |
-| Final repair gate | **826** | **2** | **16** | **614.796 s** |
+| Earlier repair gate | 826 | 2 | 16 | 614.796 s |
+| Lock/launcher/lazy-execution follow-up | 836 | 0 | 16 | 729.735 s |
+| Latest repeat, including live-harness import boundary | **836** | **1** | **16** | **701.513 s** |
 
-The final 844-test run had zero cancellations. It retains two failures: eight same-process lock contenders at the unchanged 1 s budget leave a residual owned claim, and fresh sequential cold imports measured **272.6, 243.2, 230.9 ms**, exceeding the unchanged **250 ms** budget. Contention diagnostics are retained; no speculative reclaim or timeout relaxation was used to hide that failure. Independent cross-process serialization passes with an explicit Windows fixture-only 10 s budget (four Node/tsx processes and uncached PowerShell identity observations); this is not proof the production 1 s policy meets that workload.
+The latest 853-test run had zero cancellations and one cold-start failure: **310.2, 230.7, 262.1 ms** against the unchanged **250 ms** budget. The preceding 852-test default gate passed through live command-reference verification. Six independent fresh samples then passed at **171.4–210.4 ms** (mean 192.9 ms); earlier worker samples also intermittently exceeded the threshold. `8ee66e9` demand-loads execution phases inside the existing async queue while keeping factory/tool/schema/render/lifecycle registration synchronous. ESM-load tests cover the actual dependency boundary. This is a measured improvement, not stable latency or reliably green default-gate certification. Failure diagnostics now persist startup measurements before exiting nonzero.
+
+`e4964cd` repaired the residual owned claim: instrumented release reproduced Windows directory-rename **EPERM**. At most three additional sharing-error retries revalidate the token before every rename; other errors and replacement ownership fail closed. Ten repeated eight-contender runs passed at the unchanged **1 s** budget. Persistent-error and replacement-owner tests pass; both subsequent full gates pass the lock group. Independent cross-process serialization uses an explicit Windows fixture-only 10 s budget (four Node/tsx processes and uncached PowerShell identity observations); it does not prove the production 1 s policy meets that workload.
 
 Completed follow-ups include OS-owned shim lifetime/literal argv, restored Electron CIM ownership checks, implicit abandoned-launch shutdown tracking, native ref-guard/input-mode fixtures, and exact-path standard-native Node spawn adapters with real child cleanup. Source/file URL and ffmpeg fixtures are repaired. `fc9c007` makes the requested Electron probe deadline authoritative, preserving cancellation/attachment assertions.
 
-`74dd747` repaired three maintainer CLI file-URL guards that silently skipped execution on Windows. Consequently earlier apparent generated-baseline/startup-profile successes are superseded: the real startup profile fails at **295.7 ms**; generated-doc checks now execute and pass, with LF/CRLF read-only/drift-repair tests. Build/typecheck pass. The independently executed **live command-reference gate fails** at `agent-browser skills list`: upstream reports a missing skills directory. The default gate stops at unit failure and does not certify later stages. The native fixture speedup is not live browser-performance proof; POSIX remains unexecuted.
+`74dd747` repaired three silently skipped Windows maintainer CLI entrypoints; earlier apparent generated-baseline/startup-profile successes were superseded. Generated-doc/build/typecheck checks now execute and pass. `c57726c`/`ded6d67` repaired live skills verification and the packaged doctor: Node's bare `execFile` selected a later standalone copy instead of the first npm install. They now share the runtime's JSDoc-checked native launcher resolver, preserve PATH/environment, and resolve the package-owned binary with its shipped skills. Official [v0.36.0 skills source](https://raw.githubusercontent.com/vercel-labs/agent-browser/v0.36.0/cli/src/skills.rs) confirms executable-relative package discovery. No skill override, copied binary, dependency edit, or version shim was added. Live command-reference and read-only doctor checks pass; 34 doctor/package tests and an unpacked-package CLI-help smoke passed without dependency installation. A custom shim without native layout remains an explicit maintainer-check blocker; runtime fallback support is unchanged.
+
+`eedcd3b` keeps Node test-runner hook registration out of live dogfood imports while retaining root-context fixture cleanup in Node tests. Two current Chrome loopback smokes passed all eight steps with verified 10,797-byte screenshots, but private checkout deletion still raised **EBUSY**. Runner exits were 7 before the import-boundary fix and 1 afterward; exact private-home removal succeeded after each runner exited. This repairs test-runner contamination, not the unresolved directory-handle lifetime. Checkout-only approved-model native `--version` smokes passed; they are not browser or reload certification. POSIX remains unexecuted.
 
 The installed CLI doctor reported 0.36.0 and a successful headless about:blank launch. This is a health observation, not an EOF repair, configured-source reload, authentication/restore check or release matrix.
 
@@ -65,13 +71,12 @@ Official [upstream v0.36.0 connection source](https://raw.githubusercontent.com/
 
 ## Priority queue
 
-- **P1:** diagnose same-process lock contention/residual claim without weakening ownership, stale-reclaim or deadline assertions.
-- **P1:** meet the unchanged cold-start budget through measured implementation improvement; do not raise the threshold.
-- **P1:** resolve the independently observed upstream missing-skills command-reference failure; validate the full default/release/POSIX matrix.
+- **P1:** make the unchanged cold-start budget reliable through measured implementation improvement; the latest repeat remains non-green despite an earlier complete success.
+- **P1:** validate the full release/POSIX/platform matrix and configured-source reload/restore; completed lock and launcher repairs are scoped evidence, not release certification.
 - **P1:** failed browser launch shutdown remains upstream-limited: native `close` can retry the invalid browser and fail. Ownership tracking is repaired, not daemon shutdown certification.
 - **P1:** correlate upstream EOF with daemon logs/acknowledgements; keep unknown outcomes failed/uncertain.
-- **P2:** eight model-free Chrome source-smoke steps and a 10,797-byte screenshot passed, but private-home `EBUSY` made the runner exit 1. This is not clean end-to-end dogfood or configured-source reload/restore. tmux dogfood remains uncertified.
+- **P2:** diagnose the repeated private-checkout `EBUSY` after eight successful model-free Chrome steps; clean removal after runner exit does not establish a clean runner. tmux dogfood remains uncertified.
 - **P2:** `c8e58aa` removed maintainer Node-tool shell spawning; warnings from other subprocesses are separate. POSIX-bit subtests skip Windows explicitly; no NTFS ACL/privacy assurance follows.
 - **P2:** running Pi must `/reload` or restart to activate rebuilt code. Windows restore still needs a valid explicit encryption key; no real key/security configuration was changed.
 
-All completed stages were committed locally. No follow-up push or issue closure was performed. Benchmark evidence is software execution/fixture coverage, not new jobs, completed forms or submissions.
+Completed stages are committed and pushed to the user's fork/main (native) and origin/main (Kumomi), with explicit authorization. No issue closure was performed. Benchmark evidence is software execution/fixture coverage, not new jobs, completed forms or submissions.
