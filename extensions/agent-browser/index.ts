@@ -58,7 +58,6 @@ import {
 	AGENT_BROWSER_SCRIPT_NAMESPACE,
 	createAgentBrowserScriptSessionName,
 	isAgentBrowserScriptSessionName,
-	runAgentBrowserScript,
 	type AgentBrowserScriptRunResult,
 } from "./lib/input-modes/script.js";
 import type { AgentBrowserToolResult, BrowserRunState, TraceOwner } from "./lib/orchestration/browser-run/types.js";
@@ -1563,6 +1562,8 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 					// Keep preflight inside shutdown tracking so quit cannot race into starting the sandbox afterward.
 					const versionFailure = await withIsolatedAgentBrowserEnvironment(() => validateUpstreamVersion(ctx.cwd, scriptController.signal));
 					if (versionFailure) return applyAgentBrowserOutputPath({ cwd: ctx.cwd, outputPath, result: versionFailure });
+					// Shutdown already tracks this execution before the import can yield.
+					const { runAgentBrowserScript } = await import("./lib/orchestration/script-run.js");
 					const pendingRun = runAgentBrowserScript({
 						beforeFirstCall() {
 							appendScriptSessionLease(pi, sessionName, "active");

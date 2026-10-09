@@ -15,7 +15,8 @@ import { registerHooks } from 'node:module';
 const deferred = [
   '/browser-run/index.js', '/browser-run/prepare.js', '/browser-run/process-output.js',
   '/browser-run/final-result.js', '/browser-run/diagnostics.js',
-  '/electron-host/index.js', '/electron/cleanup.js', '/electron/launch.js'
+  '/electron-host/index.js', '/electron/cleanup.js', '/electron/launch.js',
+  '/orchestration/script-run.js'
 ];
 let executionRequested = false;
 const hook = registerHooks({

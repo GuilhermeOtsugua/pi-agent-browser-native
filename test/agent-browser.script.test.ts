@@ -16,12 +16,12 @@ import {
 	AGENT_BROWSER_SCRIPT_MAX_CALLS,
 	AGENT_BROWSER_SCRIPT_SPILL_MAX_BYTES,
 	compileAgentBrowserScript,
-	runAgentBrowserScript,
 	validateAgentBrowserScriptBrowserParams,
 	type AgentBrowserScriptBrowserEnvelope,
 } from "../extensions/agent-browser/lib/input-modes/script.js";
 import { resolveAgentBrowserInput } from "../extensions/agent-browser/lib/orchestration/input-plan.js";
 import { buildScriptBrowserEnvelope, buildScriptToolResult } from "../extensions/agent-browser/lib/orchestration/script-mode.js";
+import { runAgentBrowserScript } from "../extensions/agent-browser/lib/orchestration/script-run.js";
 import {
 	createExtensionHarness,
 	executeRegisteredTool,
