@@ -200,15 +200,17 @@ export async function runAgentBrowserDogfood(options: DogfoodOptions = {}): Prom
 	const cwd = options.cwd ?? process.cwd();
 	const artifactDir = resolve(options.artifactDir ?? await mkdtemp(join(tmpdir(), "pi-agent-browser-dogfood-")));
 	const shouldRemoveArtifacts = !options.keepArtifacts && !options.artifactDir;
-	await mkdir(artifactDir, { recursive: true });
 	const jobScreenshotPath = join(artifactDir, "job.png");
-	const harness = createExtensionHarness({ cwd, sessionFile: join(artifactDir, "dogfood-session.jsonl"), sessionId: randomUUID() });
-	const fixture = await startDogfoodFixture();
+	let harness: ReturnType<typeof createExtensionHarness> | undefined;
+	let fixture: Awaited<ReturnType<typeof startDogfoodFixture>> | undefined;
 	const reports: DogfoodStepReport[] = [];
 	let closed = false;
 	let primaryFailure: unknown;
 
 	try {
+		await mkdir(artifactDir, { recursive: true });
+		harness = createExtensionHarness({ cwd, sessionFile: join(artifactDir, "dogfood-session.jsonl"), sessionId: randomUUID() });
+		fixture = await startDogfoodFixture();
 		await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
 		reports.push(await assertSuccessfulStep({
@@ -298,13 +300,15 @@ emit(values);`,
 		primaryFailure = error;
 		throw error;
 	} finally {
+		const acquiredHarness = harness;
+		const acquiredFixture = fixture;
 		await cleanupDogfoodRun({
-			closeSession: closed ? undefined : async () => {
-				const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: ['close'] });
+			closeSession: closed || !acquiredHarness || !acquiredFixture ? undefined : async () => {
+				const result = await executeRegisteredTool(acquiredHarness.tool, acquiredHarness.ctx, { args: ['close'] });
 				assert.equal(result.isError, false, `Dogfood recovery close failed: ${result.content[0]?.type === 'text' ? result.content[0].text : ''}`);
 			},
-			shutdown: async () => { await runExtensionEvent(harness.handlers, 'session_shutdown', { reason: 'quit' }, harness.ctx); },
-			closeFixture: fixture.close,
+			shutdown: async () => { if (acquiredHarness) await runExtensionEvent(acquiredHarness.handlers, 'session_shutdown', { reason: 'quit' }, acquiredHarness.ctx); },
+			closeFixture: async () => { if (acquiredFixture) await acquiredFixture.close(); },
 			removeOwnedArtifacts: shouldRemoveArtifacts ? async () => { await rm(artifactDir, { force: true, recursive: true }); } : undefined,
 		}, primaryFailure);
 	}
