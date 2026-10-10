@@ -1,8 +1,8 @@
 /** Platform smoke doctor. Fails before target runs when Crabbox/platform setup is missing. */
 
 import { execFileSync, execSync } from "node:child_process";
-import { accessSync, constants, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { accessSync, constants, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { CAPABILITY_BASELINE } from "../agent-browser-capability-baseline.mjs";
 import { buildTargetBaseArgs } from "./crabbox-runner.mjs";
@@ -77,29 +77,59 @@ function isForbiddenProjectPath(path) {
 		|| /(^|\/)\.platform-smoke-runs(?:\/|$)/.test(path);
 }
 
-function npmPackFiles() {
-	const output = silent("npm", ["pack", "--dry-run", "--json"]);
+function npmPackFiles(root) {
+	const npmExecPath = process.env.npm_execpath;
+	// Match prepare.mjs: invoke npm's JS entrypoint, or a fixed manual Windows command.
+	const output = npmExecPath
+		? silent(process.execPath, [npmExecPath, "pack", "--dry-run", "--json"], { cwd: root })
+		: process.platform === "win32"
+			? silent("cmd.exe", ["/d", "/s", "/c", "npm pack --dry-run --json"], { cwd: root })
+			: silent("npm", ["pack", "--dry-run", "--json"], { cwd: root });
 	if (!output) return null;
 	try {
 		const parsed = JSON.parse(output);
-		return parsed[0]?.files?.map((file) => file.path) ?? [];
+		const files = parsed[0]?.files;
+		if (!Array.isArray(files) || !files.every((file) => typeof file?.path === "string")) return null;
+		return files.map((file) => file.path);
 	} catch {
 		return null;
 	}
 }
 
-function checkForbiddenProjectFiles(failures) {
-	const tracked = shell("git ls-files")?.split(/\r?\n/).filter(Boolean) ?? [];
-	const trackedForbidden = tracked.filter(isForbiddenProjectPath);
-	if (trackedForbidden.length === 0) ok("tracked source files exclude forbidden local artifacts");
-	else fail(`forbidden tracked source path(s): ${trackedForbidden.join(", ")}`, failures);
+function localForbiddenArtifacts(root) {
+	const forbidden = [];
+	// Same scope as find -maxdepth 2: root entries and immediate child entries only.
+	for (const entry of readdirSync(root, { withFileTypes: true })) {
+		if (entry.name === "node_modules") continue;
+		if (/^\.env(?:\..*)?$/.test(entry.name) || entry.name.endsWith(".tgz")) forbidden.push(`./${entry.name}`);
+		if (!entry.isDirectory()) continue; // Never follow symlinks or read file contents.
+		for (const child of readdirSync(join(root, entry.name), { withFileTypes: true })) {
+			if (/^\.env(?:\..*)?$/.test(child.name) || child.name.endsWith(".tgz")) forbidden.push(`./${entry.name}/${child.name}`);
+		}
+	}
+	return forbidden;
+}
 
-	const localForbidden = shell("find . -maxdepth 2 \\( -name '.env' -o -name '.env.*' -o -name '*.tgz' \\) -not -path './node_modules/*' 2>/dev/null")
-		?.split(/\r?\n/).filter(Boolean) ?? [];
-	if (localForbidden.length === 0) ok("no local .env or package tarball artifacts at repo top level");
-	else fail(`forbidden local artifact(s): ${localForbidden.join(", ")}`, failures);
+/** Read-only repository hygiene checks; an unavailable inspection is a failure, not an empty result. */
+export function checkForbiddenProjectFiles(failures, root = process.cwd()) {
+	const trackedOutput = silent("git", ["ls-files"], { cwd: root });
+	if (trackedOutput === null) {
+		fail("could not inspect tracked source files", failures);
+	} else {
+		const trackedForbidden = trackedOutput.split(/\r?\n/).filter(Boolean).filter(isForbiddenProjectPath);
+		if (trackedForbidden.length === 0) ok("tracked source files exclude forbidden local artifacts");
+		else fail(`forbidden tracked source path(s): ${trackedForbidden.join(", ")}`, failures);
+	}
 
-	const packFiles = npmPackFiles();
+	try {
+		const localForbidden = localForbiddenArtifacts(root);
+		if (localForbidden.length === 0) ok("no local .env or package tarball artifacts at repo top level");
+		else fail(`forbidden local artifact(s): ${localForbidden.join(", ")}`, failures);
+	} catch {
+		fail("could not inspect local .env or package tarball artifacts", failures);
+	}
+
+	const packFiles = npmPackFiles(root);
 	if (!packFiles) {
 		fail("could not inspect npm pack contents", failures);
 		return;

@@ -806,11 +806,26 @@ export async function processBrowserOutput(input: ProcessBrowserOutputInput): Pr
 			? prepared.ownedManagedSessionContext?.headedManagedAutosaveInterval
 			: undefined;
 		const result = buildFinalAgentBrowserToolResult({ aboutBlankSessionMismatch, artifactCleanup, categoryDetails: finalRecoveryState.categoryDetails, clickDispatchDiagnostic, commandTokens: prepared.commandTokens, comboboxFocusDiagnostic, compiledNetworkSourceLookup: prepared.compiledNetworkSourceLookup, compiledSemanticAction: prepared.compiledSemanticAction, compatibilityWorkaround: prepared.compatibilityWorkaround, currentRefSnapshot, currentRefSnapshotInvalidation, currentSessionTabTarget, currentSessionTabTargetUnknown, electronBroadGetTextScopeDiagnostics, electronFailedConnectCleanup, electronHandoff, electronLaunch: prepared.electronLaunch, electronLaunchRecord, electronLaunchRecords, electronPostCommandHealth, electronProfileIsolationDetails: input.electronProfileIsolationDetails, electronRefFreshnessDiagnostic, electronSessionMismatch, errorText, evalResultWarning, evalStdinHint, exactSensitiveValues: prepared.exactSensitiveValues, executionPlan: prepared.executionPlan, fillVerificationDiagnostic, headedLaunch: prepared.headedLaunch, inspectionText, preserveAttachedBrowserSession: input.preserveAttachedBrowserSession === true, providerLaunch: prepared.providerLaunch, managedSessionHeadedAutosaveDisabled: resultHeadedManagedAutosaveDisabled || undefined, managedSessionHeadedAutosaveInterval: resultHeadedManagedAutosaveInterval, managedSessionOutcome, managedSessionRestoreDisabled: state.managedSessionRestoreState.isDisabled(prepared.executionPlan.sessionName, prepared.executionPlan.namespace), navigationSummary, networkSourceLookup, noActivePageSnapshotFailure: finalRecoveryState.noActivePageSnapshotFailure, openResultTabCorrection, overlayBlockerDiagnostic, parseError, parseFailureOutput, parseSucceeded, plainTextInspection, presentation, presentationEnvelope, priorSessionTabTarget: prepared.priorSessionTabTarget, processResult, qaAttachedTarget, qaPreset, recordingDependencyWarning, redactedArgs: prepared.redactedArgs, redactedCompiledElectron: prepared.redactedCompiledElectron, redactedCompiledJob: prepared.redactedCompiledJob, redactedCompiledNetworkSourceLookup: prepared.redactedCompiledNetworkSourceLookup, redactedCompiledQaPreset: prepared.redactedCompiledQaPreset, redactedCompiledSemanticAction: prepared.redactedCompiledSemanticAction, redactedCompiledSourceLookup: prepared.redactedCompiledSourceLookup, redactedContent, redactedProcessArgs: prepared.redactedProcessArgs, redactedRecoveryHint: prepared.redactedRecoveryHint, resultArtifactManifest, richInputRecoveryDiagnostic: finalRecoveryState.richInputRecoveryDiagnostic, scrollNoopDiagnostic, selectorTextVisibilityDiagnostics, sessionMode: prepared.sessionMode, sessionTabCorrection, sourceLookup, succeeded, timeoutPartialProgress, unsettledWebMcpMutation, userRequestedJson: prepared.userRequestedJson, visibleRefFallbackDiagnostic: finalRecoveryState.visibleRefFallbackDiagnostic, visibleRefFallbackSessionName: finalRecoveryState.visibleRefFallbackSessionName });
-		const resultWithCloseAll = closeAllApplied
-			? { ...result, details: { ...(isRecord(result.details) ? result.details : {}), closeAllApplied: true } }
-			: result;
+		// Attempt ownership survives a failed fresh launch independently of the
+		// public policy for whichever session remains current. Capture only the
+		// wrapper-prepared policy; upstream data and later environment changes
+		// cannot describe the daemon that this dispatch may have left behind.
+		const attemptedManagedSessionAutosavePolicy = processResult.agentBrowserStarted && !succeeded && prepared.ownedManagedSessionContext
+			? {
+				headedManagedAutosaveDisabled: prepared.ownedManagedSessionContext.headedManagedAutosaveDisabled === true,
+				headedManagedAutosaveInterval: prepared.ownedManagedSessionContext.headedManagedAutosaveInterval,
+			}
+			: undefined;
+		const resultWithOwnerPolicy = {
+			...result,
+			details: {
+				...(isRecord(result.details) ? result.details : {}),
+				attemptedManagedSessionAutosavePolicy,
+				...(closeAllApplied ? { closeAllApplied: true } : {}),
+			},
+		};
 		const statePatch: BrowserRunStatePatch = { artifactManifest, freshSessionOrdinal, managedSessionActive, managedSessionCompatibilityWorkaround, managedSessionHeadedAutosaveDisabled, managedSessionHeadedAutosaveInterval, managedSessionCwd, managedSessionName, managedSessionNamespace, networkRoutesBySession };
-		return { result: resultWithCloseAll, statePatch };
+		return { result: resultWithOwnerPolicy, statePatch };
 	} finally {
 		if (processResult.stdoutSpillPath) await rm(processResult.stdoutSpillPath, { force: true }).catch(() => undefined);
 	}

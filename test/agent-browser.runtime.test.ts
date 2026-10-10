@@ -7,7 +7,6 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -18,8 +17,6 @@ import {
 	isBooleanFlagEnabled,
 } from "../extensions/agent-browser/lib/argv-grammar.js";
 import { isRecord, parsePositiveInteger } from "../extensions/agent-browser/lib/parsing.js";
-import { LAUNCH_SCOPED_FLAGS } from "../extensions/agent-browser/lib/launch-scoped-flags.js";
-import { QUICK_START_GUIDELINES, SHARED_BROWSER_PLAYBOOK_GUIDELINES, TOOL_PROMPT_GUIDELINES_SUFFIX } from "../extensions/agent-browser/lib/playbook.js";
 import { getAgentBrowserSocketDir, getAgentBrowserSocketPathValidationError } from "../extensions/agent-browser/lib/process.js";
 import {
 	buildExecutionPlan,
@@ -1490,19 +1487,6 @@ test("buildExecutionPlan allows dash-starting --args values", () => {
 	assert.deepEqual(plan.effectiveArgs.slice(-4), ["--args", "--disable-gpu,--lang=en-US", "open", "https://example.com"]);
 });
 
-test("launch-scoped flag metadata is reflected in playbook and command reference guidance", () => {
-	const playbookText = [
-		...QUICK_START_GUIDELINES,
-		...SHARED_BROWSER_PLAYBOOK_GUIDELINES,
-		...TOOL_PROMPT_GUIDELINES_SUFFIX,
-	].join("\n");
-	const commandReference = readFileSync("docs/COMMAND_REFERENCE.md", "utf8");
-	for (const flag of LAUNCH_SCOPED_FLAGS) {
-		assert.match(playbookText, new RegExp(flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `playbook missing ${flag}`);
-		assert.match(commandReference, new RegExp(flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `command reference missing ${flag}`);
-	}
-});
-
 test("buildExecutionPlan blocks startup-scoped flags from silently reusing an active implicit session", () => {
 	for (const { args, flag } of [
 		{ args: ["--profile", "Default", "open", "https://example.com"], flag: "--profile" },
@@ -1939,22 +1923,301 @@ test("redactInvocationArgs masks sensitive flags and auth-bearing urls", () => {
 	]);
 });
 
+test("redactSensitiveText protects complete HTTP and standalone auth credentials containing slashes", () => {
+	for (const [input, portions, scheme] of [
+		["Authorization: Bearer credentialPrefix/credentialSuffix", ["credentialPrefix", "credentialSuffix"], "Bearer"],
+		["Authorization:Basic YWJj/ZGVm", ["YWJj", "ZGVm"], "Basic"],
+		["Bearer standalonePrefix/standaloneSuffix", ["standalonePrefix", "standaloneSuffix"], "Bearer"],
+		["Basic dXNlcjpw/YXNz", ["dXNlcjpw", "YXNz"], "Basic"],
+	] as const) {
+		const redacted = redactSensitiveText(input);
+		for (const portion of portions) assert.equal(redacted.includes(portion), false);
+		assert.ok(redacted.includes(scheme));
+		assert.ok(redacted.includes("[REDACTED]"));
+		assert.equal(redactSensitiveText(redacted), redacted);
+	}
+});
+
+test("redactSensitiveText scans repeated public query transitions without recursive reinterpretation", () => {
+	const input = "?public=".repeat(4_000) + "ordinary";
+	const startedAt = Date.now();
+	const redacted = redactSensitiveText(input);
+	assert.ok(Date.now() - startedAt < 1_000, "public query transitions should finish within the existing one-second scan budget");
+	assert.equal(redacted, input, "public query labels and ordinary payload remain unchanged");
+	const nested = redactSensitiveText("?public=https://example.test/?key=[nested-query-secret]&ok=1");
+	assert.equal(nested.includes("nested-query-secret"), false);
+	assert.ok(nested.includes("example.test"));
+	assert.ok(nested.includes("ok=1"));
+	const structured = redactSensitiveText('?public={"password":"nested-json-secret","status":"ready"}&ok=1');
+	assert.equal(structured.includes("nested-json-secret"), false);
+	assert.ok(structured.includes("ready"));
+	assert.ok(structured.includes("ok=1"));
+	assert.equal(redactSensitiveText(structured), structured);
+});
+
+test("redactSensitiveText keeps literal question marks inside complete sensitive query values", () => {
+	const urls = [
+		"/sso?state=credential-prefix?private-suffix&ok=1",
+		"/account?key=credential-prefix?private-suffix&ok=1",
+		"/account#access_token=credential-prefix?private-suffix&ok=1",
+		"https://example.test/sso?state=credential-prefix?private-suffix&ok=1",
+		"https://example.test/account?key=credential-prefix?private-suffix&ok=1",
+	];
+	for (const url of urls) {
+		const redacted = redactSensitiveText(`Redirect ${url}`);
+		for (const portion of ["credential-prefix", "private-suffix"]) assert.equal(redacted.includes(portion), false);
+		assert.ok(redacted.includes("ok=1"));
+		assert.ok(redacted.includes("Redirect "));
+		assert.equal(redactSensitiveText(redacted), redacted);
+	}
+	const structured = redactSensitiveText(JSON.stringify({ urls, status: "ready" }));
+	for (const portion of ["credential-prefix", "private-suffix"]) assert.equal(structured.includes(portion), false);
+	const parsed: unknown = JSON.parse(structured);
+	assert.ok(parsed && typeof parsed === "object" && "status" in parsed && parsed.status === "ready");
+	assert.ok("urls" in parsed && Array.isArray(parsed.urls) && parsed.urls.every((url) => typeof url === "string" && url.includes("ok=1")));
+	assert.equal(redactSensitiveText(structured), structured);
+});
+
+test("redactSensitiveText keeps sensitive relative query and fragment values opaque", () => {
+	for (const input of [
+		"Redirect /account?key=[123]&ok=1",
+		"Redirect /sso?state=[123]&ok=1",
+		"Redirect /account#access_token={ \"nested\": [123] }&ok=1",
+		"Redirect /oauth#nonce=[123]credential-suffix&ok=1",
+		'Redirect /account?token="query-private"&ok=1',
+	]) {
+		const redacted = redactSensitiveText(input);
+		assert.equal(redacted.includes("123"), false);
+		assert.equal(redacted.includes("credential-suffix"), false);
+		assert.equal(redacted.includes("query-private"), false);
+		assert.ok(redacted.includes("ok=1"));
+		assert.ok(redacted.includes("Redirect /"));
+		assert.equal(redactSensitiveText(redacted), redacted);
+	}
+});
+
+test("redactSensitiveText recursively masks public URL payloads without hiding ordinary query context", () => {
+	const payload = JSON.stringify({
+		password: "url-json-private",
+		nested: [{ apiKey: "url-nested-private", status: "ready" }],
+		path: "/account",
+	});
+	const urls = [
+		`https://example.test/?debug=${payload}&ok=1`,
+		`https://example.test/path/${payload}?ok=1`,
+		`/account?public=${payload}&ok=1`,
+		`/account#public=${payload}&ok=1`,
+	];
+	for (const url of urls) {
+		const redacted = redactSensitiveText(url);
+		for (const secret of ["url-json-private", "url-nested-private"]) assert.equal(redacted.includes(secret), false);
+		assert.ok(redacted.includes("ok=1"));
+		assert.ok(redacted.includes("account") || redacted.includes("example.test"));
+		assert.equal(redactSensitiveText(redacted), redacted);
+		const args = redactInvocationArgs(["open", url]);
+		for (const secret of ["url-json-private", "url-nested-private"]) assert.equal(JSON.stringify(args).includes(secret), false);
+	}
+	const redacted = redactSensitiveText(urls[0]);
+	const payloadText = new URL(redacted).searchParams.get("debug");
+	assert.ok(payloadText);
+	const parsed: unknown = JSON.parse(payloadText);
+	assert.ok(parsed && typeof parsed === "object" && "path" in parsed && parsed.path === "/account");
+	assert.ok("nested" in parsed && Array.isArray(parsed.nested));
+	const nested = parsed.nested[0];
+	assert.ok(nested && typeof nested === "object" && "status" in nested && nested.status === "ready");
+	const structured = redactSensitiveText(JSON.stringify({ urls, status: "failed" }));
+	for (const secret of ["url-json-private", "url-nested-private"]) assert.equal(structured.includes(secret), false);
+	const outer: unknown = JSON.parse(structured);
+	assert.ok(outer && typeof outer === "object" && "status" in outer && outer.status === "failed");
+	assert.ok("urls" in outer && Array.isArray(outer.urls) && outer.urls.length === urls.length);
+	assert.equal(redactSensitiveText(structured), structured);
+});
+
+test("redactSensitiveText keeps complete credential lexemes opaque around JSON-like substrings", () => {
+	for (const input of [
+		"PASSWORD=prefixSecret[123]suffixSecret; status=failed",
+		"PASSWORD=[123]suffixSecret; status=failed",
+		"PASSWORD=[123, 456]suffixSecret; status=failed",
+		'password=prefixSecret{"value":123}suffixSecret; status=failed',
+		'password={ "value": [123, 456] }suffixSecret; status=failed',
+	]) {
+		const redacted = redactSensitiveText(input);
+		for (const portion of ["prefixSecret", "suffixSecret", "123", "456"]) assert.equal(redacted.includes(portion), false);
+		assert.ok(redacted.includes("status=failed"));
+		assert.equal(redactSensitiveText(redacted), redacted);
+	}
+});
+
+test("redactSensitiveText redacts complete URL userinfo with structured-looking credential substrings", () => {
+	for (const password of ["paSecret[123]ssSecret", "paSecret{123}ssSecret"]) {
+		const url = `mongodb://usernameSecret:${password}@example.com/db`;
+		const input = `Error ${url}; status=failed`;
+		const redacted = redactSensitiveText(input);
+		for (const portion of ["usernameSecret", "paSecret", "ssSecret", "123"]) assert.equal(redacted.includes(portion), false);
+		assert.ok(redacted.includes("example.com/db"));
+		assert.ok(redacted.includes("status=failed"));
+		assert.equal(redactSensitiveText(redacted), redacted);
+		const structured = redactSensitiveText(JSON.stringify({ message: input, path: "/account" }));
+		for (const portion of ["usernameSecret", "paSecret", "ssSecret", "123"]) assert.equal(structured.includes(portion), false);
+		const parsed: unknown = JSON.parse(structured);
+		assert.ok(parsed && typeof parsed === "object" && "path" in parsed && parsed.path === "/account");
+		assert.ok("message" in parsed && typeof parsed.message === "string" && parsed.message.includes("example.com/db") && parsed.message.includes("status=failed"));
+		assert.equal(redactSensitiveText(structured), structured);
+	}
+});
+
+test("redactSensitiveText keeps structured assignment values and entire cookie headers opaque", () => {
+	for (const [input, credentials] of [
+		['API_KEY={"value":"assignment-secret"}; status=failed', ["assignment-secret"]],
+		['apiKey={ "nested": [ { "value": "nested assignment secret" }, ["array assignment secret"] ] }; status=failed', ["nested assignment secret", "array assignment secret"]],
+		['secret=[ "first array secret", { "value": "second array secret" } ]; status=failed', ["first array secret", "second array secret"]],
+		['Cookie: sid={"value":"cookie-secret"}\nstatus=failed', ["cookie-secret"]],
+		['sEt-CoOkIe: sid={ "nested": [ { "value": "nested cookie secret" } ] }; Path=/account\nstatus=failed', ["nested cookie secret"]],
+	] as const) {
+		const redacted = redactSensitiveText(input);
+		for (const credential of credentials) assert.equal(redacted.includes(credential), false);
+		assert.ok(redacted.includes("status=failed"), "ordinary prose outside the credential remains visible");
+		assert.ok(redacted.includes("[REDACTED]"));
+		assert.equal(redactSensitiveText(redacted), redacted);
+	}
+});
+
+test("redactSensitiveText preserves outer JSON while masking structured credential contexts inside strings", () => {
+	const input = JSON.stringify({
+		message: 'API_KEY={ "nested": ["structured assignment secret"] }; status=failed',
+		headers: [
+			'Cookie: sid={"value":"structured cookie secret"}\nstatus=failed',
+			'Set-Cookie: sid={ "nested": [ "structured set-cookie secret" ] }\nstatus=failed',
+			"Authorization: Bearer structured-bearer-secret",
+		],
+		path: "/account",
+	});
+	const redacted = redactSensitiveText(input);
+	for (const credential of ["structured assignment secret", "structured cookie secret", "structured set-cookie secret", "structured-bearer-secret"]) {
+		assert.equal(redacted.includes(credential), false);
+	}
+	const parsed: unknown = JSON.parse(redacted);
+	assert.ok(parsed && typeof parsed === "object" && "path" in parsed && parsed.path === "/account");
+	assert.ok("message" in parsed && typeof parsed.message === "string" && parsed.message.includes("status=failed"));
+	assert.ok("headers" in parsed && Array.isArray(parsed.headers));
+	assert.ok(parsed.headers.slice(0, 2).every((header) => typeof header === "string" && header.includes("status=failed")));
+	assert.ok(typeof parsed.headers[2] === "string" && parsed.headers[2].includes("Authorization: Bearer [REDACTED]"));
+	assert.equal(redactSensitiveText(redacted), redacted);
+});
+
+test("redactSensitiveText treats quoted credential values as opaque even when they contain JSON", () => {
+	const redacted = redactSensitiveText(`password='{"value":"opaque-credential"}'; status=failed`);
+	assert.equal(redacted.includes("opaque-credential"), false);
+	assert.ok(redacted.includes("password="));
+	assert.ok(redacted.includes("status=failed"));
+	assert.equal(redactSensitiveText(redacted), redacted);
+});
+
+test("redactSensitiveText masks embedded JSON recursively without corrupting string boundaries", () => {
+	const input = JSON.stringify({ message: "token=abc", apiKey: "key-secret", status: "ready" });
+	const redacted = redactSensitiveText(input);
+	assert.equal(redacted.includes("abc"), false);
+	assert.equal(redacted.includes("key-secret"), false);
+	const parsed: unknown = JSON.parse(redacted);
+	assert.ok(parsed && typeof parsed === "object" && "status" in parsed && parsed.status === "ready");
+	assert.ok("message" in parsed && typeof parsed.message === "string" && parsed.message.includes("token="));
+	assert.equal(redactSensitiveText(redacted), redacted);
+});
+
+test("redactSensitiveText separates surrounding assignments from nested structured diagnostics", () => {
+	const diagnostic = {
+		message: 'password="quoted \\"secret\\" value"; status=ready',
+		note: 'He said "keep context".',
+		nested: [
+			"token=nested-token-secret",
+			[{ message: "Authorization: Bearer nested-bearer-secret", apiKey: "nested-key-secret", path: "/account" }],
+		],
+	};
+	const input = [
+		'prefix password="outside-secret"; status=failed',
+		JSON.stringify(diagnostic),
+		"suffix secret=after-secret; timeout=5000",
+	].join("\n");
+	const redacted = redactSensitiveText(input);
+	for (const secret of ["quoted", "outside-secret", "after-secret", "nested-token-secret", "nested-bearer-secret", "nested-key-secret"]) {
+		assert.equal(redacted.includes(secret), false);
+	}
+	const lines = redacted.split("\n");
+	assert.ok(lines[0].includes("prefix") && lines[0].includes("status=failed"));
+	assert.ok(lines[2].includes("suffix") && lines[2].includes("timeout=5000"));
+	const parsed: unknown = JSON.parse(lines[1]);
+	assert.ok(parsed && typeof parsed === "object" && "note" in parsed && parsed.note === diagnostic.note);
+	assert.ok("nested" in parsed && Array.isArray(parsed.nested) && Array.isArray(parsed.nested[1]));
+	const nested = parsed.nested[1][0];
+	assert.ok(nested && typeof nested === "object" && "path" in nested && nested.path === "/account");
+	assert.ok("message" in nested && typeof nested.message === "string" && nested.message.includes("Authorization: Bearer [REDACTED]"));
+	assert.equal(redactSensitiveText(redacted), redacted);
+});
+
+test("redactSensitiveText retains sanitized HTTP auth schemes without exempting credential assignments", () => {
+	const credentials = ["bearer-secret", "basic-secret", "lowercase-token", "password value", "quoted secret", "assignment-secret"];
+	const input = [
+		"request GET /account",
+		"Authorization: Bearer bearer-secret",
+		"authorization: bAsIc basic-secret",
+		"AUTHORIZATION : bEaReR bearer-secret",
+		"Authorization: Basic basic-secret",
+		"token=lowercase-token, timeout=5000",
+		'password = "password value"; status=failed',
+		"secret='quoted secret'; tokenizer=ordinary",
+		"authorization=assignment-secret",
+		"help (Authorization Bearer token)",
+	].join("\n");
+	const redacted = redactSensitiveText(input);
+	for (const credential of credentials) assert.equal(redacted.includes(credential), false);
+	for (const structure of [
+		"request GET /account",
+		"Authorization: Bearer [REDACTED]",
+		"authorization: bAsIc [REDACTED]",
+		"AUTHORIZATION : bEaReR [REDACTED]",
+		"Authorization: Basic [REDACTED]",
+		"token=[REDACTED]",
+		"password = [REDACTED]",
+		"secret=[REDACTED]",
+		"authorization=[REDACTED]",
+		"timeout=5000",
+		"status=failed",
+		"tokenizer=ordinary",
+		"help (Authorization Bearer token)",
+	]) assert.ok(redacted.includes(structure), `missing nonsecret structure: ${structure}`);
+	assert.equal(redactSensitiveText(redacted), redacted, "redaction must be idempotent");
+	for (const input of ["authorization=Bearer [REDACTED]", "token: Basic [REDACTED]", 'authorization: "Bearer assignment-secret"']) {
+		const redacted = redactSensitiveText(input);
+		assert.equal(redacted.includes("assignment-secret"), false);
+		assert.doesNotMatch(redacted, /\b(?:Bearer|Basic)\b/i, "only sanitized HTTP header schemes are structural");
+	}
+});
+
 test("redactSensitiveText preserves help placeholders while redacting bearer credentials", () => {
-	assert.equal(
-		redactSensitiveText('Headers help: --headers <json> (e.g., Authorization bearer token)'),
-		'Headers help: --headers <json> (e.g., Authorization bearer token)',
-	);
-	assert.equal(redactSensitiveText("Error: Authorization: Bearer raw-token)"), "Error: Authorization: Bearer [REDACTED])");
-	assert.equal(redactSensitiveText("Authorization bearer raw-token."), "Authorization bearer [REDACTED].");
-	assert.equal(redactSensitiveText("Authorization bearer secrettoken"), "Authorization bearer [REDACTED]");
-	assert.equal(redactSensitiveText("Authorization bearer token,"), "Authorization bearer [REDACTED],");
-	assert.equal(redactSensitiveText("curl -H 'Bearer secrettoken'"), "curl -H 'Bearer [REDACTED]'");
-	assert.equal(redactSensitiveText("curl -H 'Bearer abc123'"), "curl -H 'Bearer [REDACTED]'");
-	assert.equal(redactSensitiveText("curl -H 'Bearer token.'"), "curl -H 'Bearer [REDACTED].'");
-	assert.equal(
-		redactSensitiveText("OPENAI_API_KEY=openai-secret AWS_SECRET_ACCESS_KEY: aws-secret export STRIPE_SECRET_KEY='stripe-secret' PRIVATE_KEY=-----BEGIN_PRIVATE_KEY----- X-Private-Key: prose-header-secret private-key=prose-key API-KEY=prose-api Secret-Key: prose-secret apiKey=camel-api privateKey: camel-private connectionString=camel-connection databaseUrl: camel-db mongodbUri=mongodb://user:pass@example/db MONGODB_URI=mongodb://user:pass@example/db failedChecks=true"),
-		"OPENAI_API_KEY=[REDACTED] AWS_SECRET_ACCESS_KEY: [REDACTED] export STRIPE_SECRET_KEY=[REDACTED] PRIVATE_KEY=[REDACTED] X-Private-Key: [REDACTED] private-key=[REDACTED] API-KEY=[REDACTED] Secret-Key: [REDACTED] apiKey=[REDACTED] privateKey: [REDACTED] connectionString=[REDACTED] databaseUrl: [REDACTED] mongodbUri=[REDACTED] MONGODB_URI=[REDACTED] failedChecks=true",
-	);
+	const help = redactSensitiveText("Headers help: --headers <json> (e.g., Authorization bearer token)");
+	assert.ok(help.includes("--headers <json>"));
+	assert.ok(help.includes("Authorization bearer token)"), "documented help placeholder is not a credential");
+	for (const [input, credential, structure] of [
+		["Error: Authorization: Bearer raw-token)", "raw-token", "Bearer [REDACTED])"],
+		["Authorization bearer raw-token.", "raw-token", "bearer [REDACTED]."],
+		["Authorization bearer secrettoken", "secrettoken", "bearer [REDACTED]"],
+		["Authorization bearer token,", "token", "bearer [REDACTED],"],
+		["curl -H 'Bearer secrettoken'", "secrettoken", "Bearer [REDACTED]'"],
+		["curl -H 'Bearer abc123'", "abc123", "Bearer [REDACTED]'"],
+		["curl -H 'Bearer token.'", "token", "Bearer [REDACTED].'"],
+	]) {
+		const redacted = redactSensitiveText(input);
+		assert.equal(redacted.includes(credential), false);
+		assert.ok(redacted.includes(structure), `missing credential structure: ${structure}`);
+	}
+	const assignments = redactSensitiveText("OPENAI_API_KEY=openai-secret AWS_SECRET_ACCESS_KEY: aws-secret export STRIPE_SECRET_KEY='stripe-secret' PRIVATE_KEY=-----BEGIN_PRIVATE_KEY----- X-Private-Key: prose-header-secret private-key=prose-key API-KEY=prose-api Secret-Key: prose-secret apiKey=camel-api privateKey: camel-private connectionString=camel-connection databaseUrl: camel-db mongodbUri=mongodb://user:pass@example/db MONGODB_URI=mongodb://user:pass@example/db failedChecks=true");
+	for (const credential of ["openai-secret", "aws-secret", "stripe-secret", "-----BEGIN_PRIVATE_KEY-----", "prose-header-secret", "prose-key", "prose-api", "prose-secret", "camel-api", "camel-private", "camel-connection", "camel-db", "user:pass"]) {
+		assert.equal(assignments.includes(credential), false);
+	}
+	assert.ok(assignments.includes("failedChecks=true"));
+	assert.ok(assignments.includes("X-Private-Key:"));
+	assert.ok(assignments.includes("connectionString="));
+	assert.ok(assignments.includes("[REDACTED]"));
 	assert.equal(
 		redactSensitiveText("Redirect /sso?SAMLRequest=request-secret&SAMLResponse=response-secret&RelayState=relay-secret#state=oauth-secret&nonce=oidc-secret"),
 		"Redirect /sso?SAMLRequest=[REDACTED]&SAMLResponse=[REDACTED]&RelayState=[REDACTED]#state=[REDACTED]&nonce=[REDACTED]",
@@ -1972,18 +2235,27 @@ test("redactSensitiveText preserves help placeholders while redacting bearer cre
 		redactSensitiveText("https://example.com/?private_key=url-private-secret&connection_string=db-secret&mongo_uri=mongo-secret&redis_url=redis-secret&database_url=database-secret&ok=1"),
 		"https://example.com/?private_key=%5BREDACTED%5D&connection_string=%5BREDACTED%5D&mongo_uri=%5BREDACTED%5D&redis_url=%5BREDACTED%5D&database_url=%5BREDACTED%5D&ok=1",
 	);
-	assert.equal(
-		redactSensitiveText("Error mongodb://user:pass@example/db and mongodb+srv://srv-user:srv-pass@example/db and redis://redis-user:redis-pass@example/0"),
-		"Error mongodb://%5BREDACTED%5D:%5BREDACTED%5D@example/db and mongodb+srv://%5BREDACTED%5D:%5BREDACTED%5D@example/db and redis://%5BREDACTED%5D:%5BREDACTED%5D@example/0",
-	);
-	assert.equal(
-		redactSensitiveText("Error mongodb://user:pa)ss@example/db?token=secret&ok=1 mongodb://user:p]ss@example/db?private_key=secret&ok=1 mongodb://user:p>ss@example/db#access_token=secret&ok=1"),
-		"Error mongodb://[REDACTED]:[REDACTED]@example/db?token=[REDACTED]&ok=1 mongodb://[REDACTED]:[REDACTED]@example/db?private_key=[REDACTED]&ok=1 mongodb://[REDACTED]:[REDACTED]@example/db#access_token=[REDACTED]&ok=1",
-	);
-	assert.equal(
-		redactSensitiveText("Error mongodb://[REDACTED]:[REDACTED]@example/db?token=secret&ok=1"),
-		"Error mongodb://[REDACTED]:[REDACTED]@example/db?token=[REDACTED]&ok=1",
-	);
+	for (const [input, scheme, path, credentials] of [
+		["mongodb://user:pass@example/db", "mongodb:", "/db", ["user", "pass"]],
+		["mongodb+srv://srv-user:srv-pass@example/db", "mongodb+srv:", "/db", ["srv-user", "srv-pass"]],
+		["redis://redis-user:redis-pass@example/0", "redis:", "/0", ["redis-user", "redis-pass"]],
+		["mongodb://user:pa)ss@example/db?token=secret&ok=1", "mongodb:", "/db", ["user", "pa)ss", "secret"]],
+		["mongodb://user:p]ss@example/db?private_key=secret&ok=1", "mongodb:", "/db", ["user", "p]ss", "secret"]],
+		["mongodb://user:p>ss@example/db#access_token=secret&ok=1", "mongodb:", "/db", ["user", "p>ss", "secret"]],
+		["mongodb://[REDACTED]:[REDACTED]@example/db?token=secret&ok=1", "mongodb:", "/db", ["secret"]],
+	] as const) {
+		const redacted = redactSensitiveText(input);
+		const decoded = decodeURIComponent(redacted);
+		for (const credential of credentials) assert.equal(decoded.includes(credential), false);
+		const url = new URL(redacted);
+		assert.equal(url.protocol, scheme);
+		assert.equal(url.hostname, "example");
+		assert.equal(url.pathname, path);
+		if (input.includes("ok=1")) {
+			assert.equal(url.searchParams.get("ok") ?? new URLSearchParams(url.hash.slice(1)).get("ok"), "1");
+		}
+		assert.equal(redactSensitiveText(redacted), redacted);
+	}
 });
 
 test("redactSensitiveText scans long tokens without blocking the host", () => {

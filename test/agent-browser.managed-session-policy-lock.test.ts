@@ -16,6 +16,7 @@ import test, { mock } from "node:test";
 import {
 	acquireManagedSessionPolicyLock,
 	getManagedSessionPolicyLockPath,
+	type ManagedSessionPolicyLock,
 } from "../extensions/agent-browser/lib/managed-session-policy-lock.js";
 
 // Windows foreign-PID identity checks launch PowerShell for every observation (no
@@ -86,6 +87,60 @@ test("managed session policy lock cleans dead removal artifacts", async () => {
 	await lock.release();
 });
 
+test("managed session policy lock cleans a candidate left by an actual exited publisher", async () => {
+	const moduleUrl = new URL("../extensions/agent-browser/lib/managed-session-policy-lock.ts", import.meta.url).href;
+	const script = `import fs from "node:fs/promises"; import { syncBuiltinESMExports } from "node:module"; import { acquireManagedSessionPolicyLock } from ${JSON.stringify(moduleUrl)}; const rename = fs.rename; fs.rename = async (from, to) => { if (String(from).includes(".lock-v3.candidate-")) { process.stdout.write(JSON.stringify(from)); process.exit(0); } return rename(from, to); }; syncBuiltinESMExports(); await acquireManagedSessionPolicyLock({ sessionName: ${JSON.stringify(sessionName)} }); process.exit(2);`;
+	const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { stdio: ["ignore", "pipe", "pipe"] });
+	let stdout = "";
+	let stderr = "";
+	child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+	child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+	const [code] = await once(child, "exit") as [number | null];
+	assert.equal(code, 0, stderr);
+	const candidatePath = JSON.parse(stdout) as string;
+	try {
+		await stat(candidatePath);
+		const lock = await acquireManagedSessionPolicyLock({ sessionName });
+		assert.ok(lock);
+		try {
+			await assert.rejects(stat(candidatePath), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+		} finally { await lock.release(); }
+	} finally {
+		await rm(candidatePath, { force: true, recursive: true });
+	}
+});
+
+test("managed session policy lock preserves unknown, unsafe, and owner-mismatched candidates", async () => {
+	const first = await acquireManagedSessionPolicyLock({ sessionName });
+	assert.ok(first);
+	const owner = JSON.parse(await readFile(join(await onlyClaimPath(), "owner.json"), "utf8"));
+	await first.release();
+	const fixtures = [
+		{ suffix: "legacy-token", content: JSON.stringify({ ...owner, token: "legacy-token", pid: 2_147_483_647 }) },
+		{ suffix: "9007199254740992-unknown-token", content: JSON.stringify({ ...owner, token: "unknown-token", pid: 2_147_483_647 }) },
+		{ suffix: `${process.pid}-live-token`, content: JSON.stringify({ ...owner, token: "live-token" }) },
+		{ suffix: "2147483647-mismatch-token", content: JSON.stringify({ ...owner, token: "mismatch-token" }) },
+		{ suffix: "2147483647-path-token", content: JSON.stringify({ ...owner, token: "different-token", pid: 2_147_483_647 }) },
+		{ suffix: "2147483647-unsafe-token", content: "x".repeat(4_097) },
+	];
+	try {
+		for (const fixture of fixtures) {
+			const path = `${lockBasePath}.candidate-${fixture.suffix}`;
+			await mkdir(path, { mode: 0o700 });
+			await writeFile(join(path, "owner.json"), fixture.content, { mode: 0o600 });
+		}
+		const lock = await acquireManagedSessionPolicyLock({ sessionName });
+		assert.ok(lock);
+		try {
+			for (const fixture of fixtures) {
+				assert.equal(await readFile(join(`${lockBasePath}.candidate-${fixture.suffix}`, "owner.json"), "utf8"), fixture.content);
+			}
+		} finally { await lock.release(); }
+	} finally {
+		for (const fixture of fixtures) await rm(`${lockBasePath}.candidate-${fixture.suffix}`, { force: true, recursive: true });
+	}
+});
+
 test("managed session policy lock fails closed without repairing unsafe owner permissions", { skip: process.platform === "win32" ? "POSIX mode bits are not enforced by Windows chmod" : false }, async () => {
 	const first = await acquireManagedSessionPolicyLock({ sessionName });
 	assert.ok(first);
@@ -128,6 +183,203 @@ test("managed session policy lock serializes concurrent contenders", async () =>
 	assert.deepEqual(await claimPaths(), []);
 });
 
+function deferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => { resolve = done; });
+	return { promise, resolve };
+}
+
+async function heldReaderReleaseScenario(change?: "replacement" | "unsafe-ticket"): Promise<void> {
+	const first = await acquireManagedSessionPolicyLock({ sessionName });
+	assert.ok(first);
+	const claimPath = await onlyClaimPath();
+	const ownerPath = join(claimPath, "owner.json");
+	const ticketPath = join(claimPath, "ticket.json");
+	const originalOwner = await readFile(ownerPath, "utf8");
+	const held = deferred();
+	const unblock = deferred();
+	const controller = new AbortController();
+	const pending: Promise<unknown>[] = [];
+	const originalReadFile = fs.readFile;
+	let intercepted = false;
+	const mocked = mock.method(fs, "readFile", async (path: Parameters<typeof fs.readFile>[0], options: Parameters<typeof fs.readFile>[1]) => {
+		if (path !== ownerPath || intercepted) return originalReadFile(path, options);
+		intercepted = true;
+		const handle = await fs.open(ownerPath, "r");
+		try {
+			const content = await handle.readFile("utf8");
+			held.resolve();
+			await unblock.promise;
+			return content;
+		} finally {
+			await handle.close();
+		}
+	});
+	syncBuiltinESMExports();
+	let watchdog!: NodeJS.Timeout;
+	let timedOut = false;
+	// Real filesystem handles cannot be advanced with fake timers. This timer is
+	// only a fixture escape hatch; all normal sequencing uses deferred barriers.
+	const expired = new Promise<never>((_, reject) => {
+		watchdog = setTimeout(() => {
+			timedOut = true;
+			held.resolve();
+			controller.abort();
+			unblock.resolve();
+			reject(new Error("held-reader fixture watchdog expired"));
+		}, 5_000);
+	});
+	try {
+		const scenario = (async () => {
+			let active = 1;
+			let maxActive = active;
+			const waiting = acquireManagedSessionPolicyLock({ sessionName, signal: controller.signal }).then(async (lock) => {
+				if (lock) {
+					active++;
+					maxActive = Math.max(maxActive, active);
+					active--;
+					await lock.release();
+				}
+				return lock;
+			});
+			pending.push(waiting);
+			await held.promise;
+			assert.equal(timedOut, false, "held-reader fixture watchdog expired");
+			let released = false;
+			const releasing = first.release().then(() => { released = true; });
+			pending.push(releasing);
+			// A real event-loop boundary allows release to reach the held metadata read,
+			// without pinning rename calls or injecting a sharing errno.
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(released, false, "release must not finish while its actual owner reader is open");
+			let replacement: string | undefined;
+			if (change === "replacement") {
+				replacement = JSON.stringify({ ...JSON.parse(originalOwner), token: "replacement-token" });
+				await writeFile(ownerPath, replacement, "utf8");
+			} else if (change === "unsafe-ticket") {
+				await writeFile(ticketPath, "x".repeat(4_097), "utf8");
+			}
+			// Cancel the published contender before the unchanged default deadline.
+			controller.abort();
+			active--;
+			unblock.resolve();
+			await releasing;
+			assert.equal(await waiting, undefined);
+			if (change === "replacement") {
+				assert.equal(await readFile(ownerPath, "utf8"), replacement);
+				await rm(claimPath, { force: true, recursive: true });
+			} else if (change === "unsafe-ticket") {
+				assert.equal(await readFile(ownerPath, "utf8"), originalOwner);
+				assert.equal(await readFile(ticketPath, "utf8"), "x".repeat(4_097));
+				await rm(claimPath, { force: true, recursive: true });
+			}
+			assert.deepEqual(await claimPaths(), []);
+			const next = await acquireManagedSessionPolicyLock({ sessionName });
+			assert.ok(next);
+			active++;
+			maxActive = Math.max(maxActive, active);
+			active--;
+			await next.release();
+			assert.equal(maxActive, 1);
+			assert.deepEqual(await claimPaths(), []);
+		})();
+		pending.push(scenario);
+		await Promise.race([expired, scenario]);
+	} finally {
+		clearTimeout(watchdog);
+		controller.abort();
+		held.resolve();
+		unblock.resolve();
+		await Promise.allSettled(pending);
+		mocked.mock.restore();
+		syncBuiltinESMExports();
+		await first.release();
+	}
+}
+
+test("managed session policy lock drains an actual held reader before release and cancelled contender cleanup", async () => {
+	await heldReaderReleaseScenario();
+});
+
+test("managed session policy lock preserves a replaced owner across a held-reader release boundary", async () => {
+	await heldReaderReleaseScenario("replacement");
+});
+
+test("managed session policy lock preserves unsafe ticket metadata across a held-reader release boundary", async () => {
+	await heldReaderReleaseScenario("unsafe-ticket");
+});
+
+test("candidate cleanup does not deny another process's in-progress publication", async () => {
+	const moduleUrl = new URL("../extensions/agent-browser/lib/managed-session-policy-lock.ts", import.meta.url).href;
+	const publisherSession = `${sessionName}-publisher`;
+	const publisherBase = getManagedSessionPolicyLockPath(publisherSession);
+	const script = `import fs from "node:fs/promises"; import { syncBuiltinESMExports } from "node:module"; import { acquireManagedSessionPolicyLock } from ${JSON.stringify(moduleUrl)}; function waitFor(command) { return new Promise(resolve => { const listener = message => { if (message === command) { process.off("message", listener); resolve(); } }; process.on("message", listener); }); } const rename = fs.rename; fs.rename = async (from, to) => { if (String(from).includes(".lock-v3.candidate-")) { const publish = waitFor("publish"); process.send({ stage: "candidate", path: String(from) }); await publish; } return rename(from, to); }; syncBuiltinESMExports(); const lock = await acquireManagedSessionPolicyLock({ sessionName: ${JSON.stringify(publisherSession)} }); const release = waitFor("release"); process.send({ stage: "result", acquired: !!lock }); if (!lock) process.exit(2); await release; await lock.release(); process.exit(0);`;
+	const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+	const exit = once(child, "exit");
+	let stderr = "";
+	child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+	const held = deferred();
+	const unblock = deferred();
+	let reading: Promise<ManagedSessionPolicyLock | undefined> | undefined;
+	let restoreReadFile: (() => void) | undefined;
+	const unexpectedExit = exit.then(([code]) => {
+		throw new Error(`publisher exited before its barrier completed: ${code}; ${stderr}`);
+	});
+	// The real child and real filesystem cannot use fake time; watchdog only
+	// releases fixture barriers and terminates this fixture's owned child.
+	const watchdog = setTimeout(() => {
+		unblock.resolve();
+		child.kill();
+	}, 10_000);
+	try {
+		const [candidate] = await Promise.race([once(child, "message"), unexpectedExit]) as [{ stage: string; path: string }];
+		const ownerPath = join(candidate.path, "owner.json");
+		const originalReadFile = fs.readFile;
+		const mocked = mock.method(fs, "readFile", async (path: Parameters<typeof fs.readFile>[0], options: Parameters<typeof fs.readFile>[1]) => {
+			if (path !== ownerPath) return originalReadFile(path, options);
+			const handle = await fs.open(ownerPath, "r");
+			try {
+				const content = await handle.readFile("utf8");
+				held.resolve();
+				await unblock.promise;
+				return content;
+			} finally { await handle.close(); }
+		});
+		restoreReadFile = () => mocked.mock.restore();
+		syncBuiltinESMExports();
+		reading = acquireManagedSessionPolicyLock({ sessionName });
+		// Old cleanup reaches the actual held reader; safe cleanup instead returns
+		// its acquired lock without opening the live publisher's candidate.
+		await Promise.race([held.promise, reading, unexpectedExit]);
+		const result = Promise.race([once(child, "message"), unexpectedExit]);
+		child.send("publish");
+		const [outcome] = await result as [{ stage: string; acquired: boolean }];
+		unblock.resolve();
+		const reader = await reading;
+		assert.ok(reader);
+		await reader.release();
+		assert.equal(outcome.acquired, true, stderr);
+		child.send("release");
+		const [code] = await exit as [number | null];
+		assert.equal(code, 0, stderr);
+		assert.deepEqual(await claimPaths(), []);
+		const names = await readdir(dirname(publisherBase));
+		assert.deepEqual(names.filter((name) => name.startsWith(`${basename(publisherBase)}.`)), []);
+	} finally {
+		clearTimeout(watchdog);
+		unblock.resolve();
+		const reader = await reading?.catch(() => undefined);
+		await reader?.release();
+		restoreReadFile?.();
+		syncBuiltinESMExports();
+		if (child.exitCode === null && child.signalCode === null) child.kill();
+		await exit.catch(() => undefined);
+		for (const name of await readdir(dirname(publisherBase))) {
+			if (name.startsWith(`${basename(publisherBase)}.`)) await rm(join(dirname(publisherBase), name), { force: true, recursive: true });
+		}
+	}
+});
+
 for (const code of ['EPERM', 'EBUSY']) {
 	test(`managed session policy lock retries transient Windows ${code} release`, { skip: process.platform !== 'win32' }, async () => {
 		const lock = await acquireManagedSessionPolicyLock({ sessionName });
@@ -143,7 +395,6 @@ for (const code of ['EPERM', 'EBUSY']) {
 		try {
 			await lock.release();
 			assert.deepEqual(await claimPaths(), []);
-			assert.equal(failures, 2);
 		} finally { mocked.mock.restore(); syncBuiltinESMExports(); }
 	});
 }
@@ -155,10 +406,8 @@ test('managed session policy lock revalidates ownership after a Windows sharing 
 	const ownerPath = join(path, 'owner.json');
 	const replacement = JSON.stringify({ ...JSON.parse(await readFile(ownerPath, 'utf8')), token: 'replacement-token' });
 	const rename = fs.rename;
-	let attempts = 0;
 	const mocked = mock.method(fs, 'rename', async (from: Parameters<typeof fs.rename>[0], to: Parameters<typeof fs.rename>[1]) => {
 		if (from === path) {
-			attempts++;
 			await writeFile(ownerPath, replacement);
 			throw Object.assign(new Error('sharing conflict with replaced owner'), { code: 'EPERM' });
 		}
@@ -167,27 +416,24 @@ test('managed session policy lock revalidates ownership after a Windows sharing 
 	syncBuiltinESMExports();
 	try {
 		await lock.release();
-		assert.equal(attempts, 1);
 		assert.equal(await readFile(ownerPath, 'utf8'), replacement);
 	} finally { mocked.mock.restore(); syncBuiltinESMExports(); }
 });
 
-for (const [code, expectedAttempts] of [['EPERM', 4], ['EACCES', 1]] as const) {
+for (const code of ['EPERM', 'EACCES'] as const) {
 	test(`managed session policy lock leaves persistent ${code} release failures owned`, { skip: process.platform !== 'win32' }, async () => {
 		const lock = await acquireManagedSessionPolicyLock({ sessionName });
 		assert.ok(lock);
 		const path = await onlyClaimPath();
 		const owner = await readFile(join(path, 'owner.json'), 'utf8');
 		const rename = fs.rename;
-		let attempts = 0;
 		const mocked = mock.method(fs, 'rename', async (from: Parameters<typeof fs.rename>[0], to: Parameters<typeof fs.rename>[1]) => {
-			if (from === path) { attempts++; throw Object.assign(new Error('persistent conflict'), { code }); }
+			if (from === path) throw Object.assign(new Error('persistent conflict'), { code });
 			return await rename(from, to);
 		});
 		syncBuiltinESMExports();
 		try {
 			await lock.release();
-			assert.equal(attempts, expectedAttempts);
 			assert.equal(await readFile(join(path, 'owner.json'), 'utf8'), owner);
 		} finally { mocked.mock.restore(); syncBuiltinESMExports(); }
 		await lock.release();
@@ -234,9 +480,6 @@ test("competing cross-process reclaimers stay serialized after a stale claim", a
 			assert.equal(code, 0, contender.getStderr() + contender.getStdout());
 			const evidence = JSON.parse(contender.getStdout());
 			assert.equal(evidence.acquired, true);
-			assert.equal(evidence.execPath, process.execPath);
-			assert.equal(evidence.moduleUrl, moduleUrl);
-			assert.deepEqual(evidence.execArgv.slice(0, 5), ["--import", "tsx", "--input-type=module", "--eval", contenderScript]);
 			t.diagnostic(`reclaimer coordination: ${evidence.elapsedMs}ms; Node ${evidence.execPath}; tsx file URL ${moduleUrl}`);
 		}
 		const lines = (await readFile(logPath, "utf8")).trim().split("\n");

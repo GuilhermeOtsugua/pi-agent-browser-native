@@ -36,7 +36,8 @@ import {
 import { extractExplicitNamespace, extractExplicitSessionName, getAgentBrowserSessionIdentityKey, isAgentBrowserSessionIdentityKeyInNamespace, isUpstreamEnvFlagEnabled, resolveAgentBrowserNamespace } from "./lib/argv-grammar.js";
 import { parseArgvDescriptor } from "./lib/argv-descriptor.js";
 import { needsManagedSession } from "./lib/command-policy.js";
-import { ManagedSessionRestoreState } from "./lib/managed-session-restore.js";
+import { ManagedSessionRestoreState, resolveExplicitAutosaveInterval } from "./lib/managed-session-restore.js";
+import { isManagedSessionRestoreKey } from "./lib/managed-session-storage.js";
 import { isRecord } from "./lib/parsing.js";
 import { runAgentBrowserProcess } from "./lib/process.js";
 import { getAgentBrowserProcessEnvironment, withIsolatedAgentBrowserEnvironment } from "./lib/process-environment.js";
@@ -75,6 +76,7 @@ import { buildValidationFailureResult, resolveAgentBrowserInput, type AgentBrows
 import { applyAgentBrowserOutputPath, normalizeRequestedOutputPath } from "./lib/orchestration/output-file.js";
 import { appendScriptSessionLease, buildScriptBrowserEnvelope, buildScriptToolResult, getScriptSessionLeasesFromBranch } from "./lib/orchestration/script-mode.js";
 import type { FileArtifactMetadata, NetworkRouteRecord, SessionArtifactManifest } from "./lib/results/contracts.js";
+import { truncateText } from "./lib/results/text.js";
 import { formatSessionArtifactRetentionSummary, getSessionArtifactManifestEntryKey, isPendingRecordingCommand, isSessionArtifactManifest, mergeSessionArtifactManifest, retirePendingRecordingManifestEntries } from "./lib/results/artifact-manifest.js";
 import { appendUniqueAgentBrowserNextActions, applyNamespaceToNextActions, applySessionToNextActions, buildNextToolAction, type AgentBrowserNextAction } from "./lib/results/next-actions.js";
 import { canRegisterWebSearchTool, loadAgentBrowserConfigSync } from "./lib/config.js";
@@ -117,6 +119,49 @@ type OwnedManagedSession = {
 	namespace?: string;
 	sessionName: string;
 };
+
+const MANAGED_CLEANUP_ENTRY_TYPE = "agent-browser-managed-cleanup";
+type ManagedCleanupTransition = {
+	version: 1;
+	state: "pending" | "closed";
+	dispatched: true;
+	sessionId: string;
+	baseName: string;
+	owner: OwnedManagedSession;
+	attached: boolean;
+	restoreDisabled: boolean;
+	daemonRestoreKey?: string | null;
+};
+
+// Custom entries are host bookkeeping, never model-visible messages. Validate the
+// dispatch-owned record in its original Pi/check-out scope, not just its name.
+function restoreManagedCleanupTransitions(branch: unknown[], sessionId: string | undefined, baseName: string): Map<string, ManagedCleanupTransition> {
+	const transitions = new Map<string, ManagedCleanupTransition>();
+	if (!sessionId) return transitions;
+	for (const entry of branch) {
+		if (!isRecord(entry) || entry.type !== "custom" || entry.customType !== MANAGED_CLEANUP_ENTRY_TYPE || !isRecord(entry.data)) continue;
+		const data = entry.data;
+		const owner = data.owner;
+		if (data.version !== 1 || data.dispatched !== true || data.sessionId !== sessionId || data.baseName !== baseName
+			|| (data.state !== "pending" && data.state !== "closed") || !isRecord(owner)
+			|| typeof owner.cwd !== "string" || owner.cwd.length === 0 || owner.cwd.length > 4_096
+			|| createImplicitSessionName(sessionId, owner.cwd, "") !== baseName
+			|| typeof owner.sessionName !== "string"
+			|| !(owner.sessionName === baseName || (owner.sessionName.startsWith(`${baseName}-fresh-`) && /^[a-f0-9]{10}$/.test(owner.sessionName.slice(baseName.length + 7))))
+			|| owner.branchOwned !== false
+			|| Object.keys(owner).some((key) => !["branchOwned", "compatibilityWorkaround", "cwd", "headedManagedAutosaveDisabled", "headedManagedAutosaveInterval", "namespace", "sessionName"].includes(key))
+			|| Object.keys(data).some((key) => !["version", "dispatched", "state", "sessionId", "baseName", "owner", "attached", "restoreDisabled", "daemonRestoreKey"].includes(key))
+			|| (owner.namespace !== undefined && (typeof owner.namespace !== "string" || owner.namespace.length > 256 || resolveAgentBrowserNamespace(["--namespace", owner.namespace], undefined) !== owner.namespace))
+			|| typeof data.attached !== "boolean" || typeof data.restoreDisabled !== "boolean"
+			|| typeof owner.headedManagedAutosaveDisabled !== "boolean"
+			|| (owner.headedManagedAutosaveInterval !== undefined && (typeof owner.headedManagedAutosaveInterval !== "string" || owner.headedManagedAutosaveInterval.length > 20 || resolveExplicitAutosaveInterval(owner.headedManagedAutosaveInterval) !== owner.headedManagedAutosaveInterval))
+			|| (Object.hasOwn(data, "daemonRestoreKey") && data.daemonRestoreKey !== null && !isManagedSessionRestoreKey(data.daemonRestoreKey as string))
+			|| (owner.compatibilityWorkaround !== undefined && (!isRecord(owner.compatibilityWorkaround) || !getRecognizedCompatibilityWorkaround(owner.compatibilityWorkaround) || typeof owner.compatibilityWorkaround.reason !== "string" || owner.compatibilityWorkaround.reason.length > 512))) continue;
+		const transition = data as unknown as ManagedCleanupTransition;
+		transitions.set(getAgentBrowserSessionIdentityKey(owner.sessionName, owner.namespace as string | undefined), transition);
+	}
+	return transitions;
+}
 
 // Event ranks are local to the branch being restored. Keep them out of owned-resource
 // state so branch switches never compare unrelated branch histories.
@@ -477,7 +522,7 @@ function untrackOwnedManagedSessionFromBranchClose(
 	sessions.delete(sessionName);
 }
 
-function syncOwnedManagedSessionsFromResult(sessions: Map<string, OwnedManagedSession>, result: AgentToolResult<unknown>, cwd: string): void {
+function syncOwnedManagedSessionsFromResult(sessions: Map<string, OwnedManagedSession>, result: AgentToolResult<unknown>, cwd: string, dispatchedCwd: string): void {
 	const details = isRecord(result.details) ? result.details : undefined;
 	const outcome = isRecord(details?.managedSessionOutcome) ? details.managedSessionOutcome : undefined;
 	if (!outcome) return;
@@ -486,14 +531,25 @@ function syncOwnedManagedSessionsFromResult(sessions: Map<string, OwnedManagedSe
 	const currentSessionName = typeof outcome.currentSessionName === "string" ? outcome.currentSessionName : undefined;
 	const attemptedSessionName = typeof outcome.attemptedSessionName === "string" ? outcome.attemptedSessionName : undefined;
 	const namespace = isRecord(details) && typeof details.namespace === "string" ? details.namespace : undefined;
-	// A failed browser launch can still leave our generated session's daemon alive.
-	// Retain shutdown ownership without claiming an active page or closing it before readback.
-	const abandonedOwnedLaunch = status === "abandoned" && details?.usedImplicitSession === true && details.agentBrowserStarted === true;
-	if (abandonedOwnedLaunch || (outcome.activeAfter === true && (status === "created" || status === "replaced" || status === "unchanged"))) {
-		trackOwnedManagedSession(sessions, abandonedOwnedLaunch ? attemptedSessionName : currentSessionName, cwd, {
+	// attemptedSessionName comes from the wrapper-managed execution plan, not caller
+	// selection hints. A dispatched failed fresh attempt can leave a daemon behind
+	// even when the outcome preserves a different previously active session.
+	// Retain cleanup ownership without claiming an active page or closing before readback.
+	const failedOwnedLaunch = (status === "abandoned"
+		|| (status === "preserved" && outcome.sessionMode === "fresh" && attemptedSessionName !== currentSessionName))
+		&& outcome.succeeded === false && details?.agentBrowserStarted === true && attemptedSessionName !== undefined;
+	const autosavePolicy = failedOwnedLaunch && isRecord(details?.attemptedManagedSessionAutosavePolicy)
+		? details.attemptedManagedSessionAutosavePolicy
+		: undefined;
+	if (failedOwnedLaunch || (outcome.activeAfter === true && (status === "created" || status === "replaced" || status === "unchanged"))) {
+		trackOwnedManagedSession(sessions, failedOwnedLaunch ? attemptedSessionName : currentSessionName, failedOwnedLaunch ? dispatchedCwd : cwd, {
 			compatibilityWorkaround: getRecognizedCompatibilityWorkaround(details?.compatibilityWorkaround),
-			headedManagedAutosaveDisabled: details?.managedSessionHeadedAutosaveDisabled === true,
-			headedManagedAutosaveInterval: typeof details?.managedSessionHeadedAutosaveInterval === "string" ? details.managedSessionHeadedAutosaveInterval : undefined,
+			headedManagedAutosaveDisabled: failedOwnedLaunch
+				? autosavePolicy?.headedManagedAutosaveDisabled === true
+				: details?.managedSessionHeadedAutosaveDisabled === true,
+			headedManagedAutosaveInterval: failedOwnedLaunch
+				? typeof autosavePolicy?.headedManagedAutosaveInterval === "string" ? autosavePolicy.headedManagedAutosaveInterval : undefined
+				: typeof details?.managedSessionHeadedAutosaveInterval === "string" ? details.managedSessionHeadedAutosaveInterval : undefined,
 			namespace,
 		});
 	}
@@ -773,14 +829,24 @@ function syncElectronCleanupManagedSessions(sessions: Map<string, OwnedManagedSe
 
 async function closeOwnedManagedSessionsExcept(sessions: Map<string, OwnedManagedSession>, restoreState: ManagedSessionRestoreState, keepSessionName: string | undefined, timeoutMs: number, attachedSessionKeys: ReadonlySet<string>, keepNamespace?: string, onClosed?: (owner: OwnedManagedSession) => void): Promise<void> {
 	const keepKey = getSessionContextKey(keepSessionName, keepNamespace);
+	const failures: Error[] = [];
 	for (const [key, owner] of [...sessions]) {
 		if (key === keepKey) continue;
-		const error = await closeManagedSession({ cwd: owner.cwd, headedManagedAutosaveInterval: owner.headedManagedAutosaveInterval, namespace: owner.namespace, preserveAttachedBrowserSession: attachedSessionKeys.has(key), restoreState, sessionName: owner.sessionName, timeoutMs });
-		if (!error) {
+		let error: string | undefined;
+		try {
+			error = await closeManagedSession({ cwd: owner.cwd, headedManagedAutosaveInterval: owner.headedManagedAutosaveInterval, namespace: owner.namespace, preserveAttachedBrowserSession: attachedSessionKeys.has(key), restoreState, sessionName: owner.sessionName, timeoutMs });
+		} catch (cause) {
+			error = truncateText(redactSensitiveText(cause instanceof Error ? cause.message : String(cause)), 2_000)
+				|| "Managed-session cleanup failed without an error message.";
+		}
+		if (error) {
+			failures.push(new Error(`Managed session ${truncateText(redactSensitiveText(key), 256)} close failed: ${error}`));
+		} else {
 			sessions.delete(key);
 			onClosed?.(owner);
 		}
 	}
+	if (failures.length > 0) throw new AggregateError(failures, truncateText(`Owned managed-session cleanup failed; failed sessions remain tracked for retry. ${failures.map((failure) => truncateText(redactSensitiveText(failure.message), 768)).join("; ")}`, 4_096));
 }
 
 async function closeOwnedManagedSessions(sessions: Map<string, OwnedManagedSession>, restoreState: ManagedSessionRestoreState, timeoutMs: number, attachedSessionKeys: ReadonlySet<string>, onClosed?: (owner: OwnedManagedSession) => void): Promise<void> {
@@ -989,6 +1055,36 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 	let branchRestoreGeneration = 0;
 	let branchStateGeneration = 0;
 	const validatedUpstreamPathKeys = new Set<string>();
+	let cleanupSessionId: string | undefined;
+	const cleanupTransitionsToPersist = new Map<string, ManagedCleanupTransition>();
+	const closedManagedCleanupIdentities = new Map<string, { sessionName: string; namespace?: string }>();
+	const persistManagedCleanup = (owner: OwnedManagedSession, state: "pending" | "closed"): void => {
+		if (!cleanupSessionId || isAgentBrowserScriptSessionName(owner.sessionName)) return;
+		const key = getAgentBrowserSessionIdentityKey(owner.sessionName, owner.namespace);
+		const transition: ManagedCleanupTransition = {
+			version: 1, dispatched: true, state, sessionId: cleanupSessionId, baseName: managedSessionBaseName,
+			owner: { ...owner, branchOwned: false, headedManagedAutosaveDisabled: owner.headedManagedAutosaveDisabled === true,
+				compatibilityWorkaround: owner.compatibilityWorkaround ? { ...owner.compatibilityWorkaround, reason: truncateText(redactSensitiveText(owner.compatibilityWorkaround.reason), 512) } : undefined },
+			attached: attachedSessionKeys.has(key),
+			restoreDisabled: managedSessionRestoreState.isDisabled(owner.sessionName, owner.namespace),
+			...(managedSessionRestoreState.hasDaemonRestoreKey(owner.sessionName, owner.namespace) ? { daemonRestoreKey: managedSessionRestoreState.getDaemonRestoreKey(owner.sessionName, owner.namespace) } : {}),
+		};
+		if (state === "closed") closedManagedCleanupIdentities.set(key, { sessionName: owner.sessionName, namespace: owner.namespace });
+		else closedManagedCleanupIdentities.delete(key);
+		cleanupTransitionsToPersist.set(key, transition);
+	};
+	const flushManagedCleanup = (): Error[] => {
+		const failures: Error[] = [];
+		for (const [key, transition] of cleanupTransitionsToPersist) {
+			try {
+				pi.appendEntry(MANAGED_CLEANUP_ENTRY_TYPE, transition);
+				cleanupTransitionsToPersist.delete(key);
+			} catch {
+				failures.push(new Error(`Managed session ${truncateText(redactSensitiveText(key), 256)} cleanup bookkeeping could not be saved; retry required.`));
+			}
+		}
+		return failures;
+	};
 
 	const appendRecordingTransitions = (transitions: ReturnType<typeof applyRecordingArtifactsToReservations>): void => {
 		for (const transition of transitions) {
@@ -1139,6 +1235,19 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 		sessionPageState.clearSession(key);
 	};
 
+	const invalidateClosedManagedSession = (sessionName: string, namespace?: string): void => {
+		const closedSessionKey = getSessionContextKey(sessionName, namespace) ?? sessionName;
+		clearSessionScopedBrowserState(sessionName, namespace);
+		if (closedSessionKey !== (getSessionContextKey(managedSessionName, managedSessionNamespace) ?? managedSessionName)) return;
+		managedSessionActive = false;
+		managedSessionCompatibilityWorkaround = undefined;
+		managedSessionHeadedAutosaveDisabled = false;
+		managedSessionHeadedAutosaveInterval = undefined;
+		managedSessionNamespace = undefined;
+		freshSessionOrdinal += 1;
+		managedSessionName = createFreshSessionName(managedSessionBaseName, ephemeralSessionSeed, freshSessionOrdinal);
+	};
+
 	const closeScriptSessionLeaseWithinQueue = async (sessionName: string, cwd: string): Promise<string | undefined> => {
 		const closeError = await withIsolatedAgentBrowserEnvironment(() => closeManagedSession({
 			cwd,
@@ -1191,16 +1300,19 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 		const previousAttachedSessionKeys = attachedSessionKeys;
 		managedSessionBaseName = createImplicitSessionName(ctx.sessionManager.getSessionId(), ctx.cwd, ephemeralSessionSeed);
 		const branch = ctx.sessionManager.getBranch();
+		cleanupSessionId = ctx.sessionManager.getSessionId();
+		const cleanupTransitions = restoreManagedCleanupTransitions(branch, cleanupSessionId, managedSessionBaseName);
 		const branchResourceEvents = collectBranchManagedResourceEvents(branch);
 		const restoredState = restoreManagedSessionStateFromBranch(branch, managedSessionBaseName);
 		managedSessionRestoreState.replace(restoredState.managedSessionRestoreDisabledIdentities, {
 			preserveDaemonRestoreKeys: !options.resetRuntimeOwnership,
 		});
-		managedSessionActive = restoredState.active;
+		const restoredSessionIsClosed = closedManagedCleanupIdentities.has(getAgentBrowserSessionIdentityKey(restoredState.sessionName, restoredState.namespace));
+		managedSessionActive = restoredState.active && !restoredSessionIsClosed;
 		const restoredFreshSessionOrdinal = options.resetRuntimeOwnership
 			? restoredState.freshSessionOrdinal
 			: Math.max(previousFreshSessionOrdinal, restoredState.freshSessionOrdinal);
-		const shouldReservePostCloseSession = !restoredState.active && restoredState.closedSessionName === restoredState.sessionName;
+		const shouldReservePostCloseSession = restoredSessionIsClosed || (!restoredState.active && restoredState.closedSessionName === restoredState.sessionName);
 		const alreadyReservedPostCloseSession = shouldReservePostCloseSession
 			&& !options.resetRuntimeOwnership
 			&& !previousManagedSessionActive
@@ -1305,6 +1417,27 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 			branchOwnedLaunchIds: branchOwnedElectronLaunchIds,
 			markBranchOwned: true,
 		});
+		for (const [key, transition] of cleanupTransitionsToPersist) cleanupTransitions.set(key, transition);
+		for (const [key, transition] of cleanupTransitions) {
+			if (transition.state === "closed") {
+				closedManagedCleanupIdentities.set(key, { sessionName: transition.owner.sessionName, namespace: transition.owner.namespace });
+				continue;
+			}
+			// Branch history cannot supersede an ACK retained by this runtime.
+			// A real new lifecycle clears its exact tombstone in persistManagedCleanup.
+			if (closedManagedCleanupIdentities.has(key)) continue;
+			ownedManagedSessions.set(key, { ...transition.owner });
+			if (transition.attached) attachedSessionKeys.add(key);
+			else attachedSessionKeys.delete(key);
+			managedSessionRestoreState.clear(transition.owner.sessionName, transition.owner.namespace);
+			if (transition.restoreDisabled) managedSessionRestoreState.disable(transition.owner.sessionName, transition.owner.namespace);
+			if (Object.hasOwn(transition, "daemonRestoreKey")) managedSessionRestoreState.recordDaemonRestoreKey(transition.owner.sessionName, transition.owner.namespace, transition.daemonRestoreKey!);
+		}
+		for (const [key, identity] of closedManagedCleanupIdentities) {
+			ownedManagedSessions.delete(key);
+			managedSessionRestoreState.clear(identity.sessionName, identity.namespace);
+			invalidateClosedManagedSession(identity.sessionName, identity.namespace);
+		}
 		if (!options.resetRuntimeOwnership) {
 			for (const sessionKey of previousAttachedSessionKeys) {
 				if (ownedManagedSessions.has(sessionKey)) attachedSessionKeys.add(sessionKey);
@@ -1329,9 +1462,17 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 		webSearchToolRegistered = true;
 	};
 
-	pi.on("session_start", async (_event, ctx) => {
-		restoreBranchBackedState(ctx, { resetRuntimeOwnership: true });
-		electronChildProcesses = new Map<string, ChildProcess>();
+	pi.on("session_start", async (event, ctx) => {
+		const resetRuntimeOwnership = event.reason !== "reload";
+		const disabledOwners = resetRuntimeOwnership ? [] : [...ownedManagedSessions.values()]
+			.filter((owner) => managedSessionRestoreState.isDisabled(owner.sessionName, owner.namespace));
+		restoreBranchBackedState(ctx, { resetRuntimeOwnership });
+		for (const owner of disabledOwners) {
+			if (ownedManagedSessions.has(getSessionContextKey(owner.sessionName, owner.namespace) ?? owner.sessionName)) {
+				managedSessionRestoreState.disable(owner.sessionName, owner.namespace);
+			}
+		}
+		if (resetRuntimeOwnership) electronChildProcesses = new Map<string, ChildProcess>();
 		registerWebSearchToolIfAvailable(loadAgentBrowserConfigSync({
 			cwd: ctx.cwd,
 			includeProjectConfig: shouldIncludeProjectConfig(ctx),
@@ -1354,9 +1495,11 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 		branchRestoreGeneration += 1;
 		branchStateGeneration += 1;
 		let preservedElectronProfileDirs: string[] = [];
+		let managedSessionCleanupError: AggregateError | undefined;
 		await artifactExecutionQueue.run(() => managedSessionExecutionQueue.run(async () => {
 			const shutdownCwd = ctx?.cwd ?? managedSessionCwd;
 			const quitting = event?.reason === "quit";
+			for (const owner of ownedManagedSessions.values()) persistManagedCleanup(owner, "pending");
 			preservedElectronProfileDirs = quitting
 				? []
 				: getActiveElectronRecords(electronLaunchRecords).map((record) => record.userDataDir);
@@ -1379,27 +1522,42 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 				...preservedElectronProfileDirs,
 				...getCleanupResultsPreservedUserDataDirs(electronCleanupResults),
 			])];
+			for (const identity of getCleanupResultsClosedManagedSessionIdentities(electronCleanupResults)) {
+				const owner = ownedManagedSessions.get(getAgentBrowserSessionIdentityKey(identity.sessionName, identity.namespace));
+				if (owner) persistManagedCleanup(owner, "closed");
+			}
 			syncElectronCleanupManagedSessions(ownedManagedSessions, electronCleanupResults);
-			for (const identity of getCleanupResultsClosedManagedSessionIdentities(electronCleanupResults)) retireRecordingSession(identity.sessionName, identity.namespace);
-			if (quitting) {
-				await closeOwnedManagedSessions(ownedManagedSessions, managedSessionRestoreState, implicitSessionCloseTimeoutMs, attachedSessionKeys, (owner) => retireRecordingSession(owner.sessionName, owner.namespace));
-			} else {
-				await closeOwnedManagedSessionsExcept(
-					ownedManagedSessions,
-					managedSessionRestoreState,
-					managedSessionActive ? managedSessionName : undefined,
-					implicitSessionCloseTimeoutMs,
-					attachedSessionKeys,
-					managedSessionActive ? managedSessionNamespace : undefined,
-					(owner) => retireRecordingSession(owner.sessionName, owner.namespace),
-				);
+			for (const identity of getCleanupResultsClosedManagedSessionIdentities(electronCleanupResults)) {
+				retireRecordingSession(identity.sessionName, identity.namespace);
+				invalidateClosedManagedSession(identity.sessionName, identity.namespace);
+			}
+			try {
+				if (quitting) {
+					await closeOwnedManagedSessions(ownedManagedSessions, managedSessionRestoreState, implicitSessionCloseTimeoutMs, attachedSessionKeys, (owner) => {
+						persistManagedCleanup(owner, "closed");
+						retireRecordingSession(owner.sessionName, owner.namespace);
+						invalidateClosedManagedSession(owner.sessionName, owner.namespace);
+					});
+				} else {
+					await closeOwnedManagedSessionsExcept(
+						ownedManagedSessions,
+						managedSessionRestoreState,
+						managedSessionActive ? managedSessionName : undefined,
+						implicitSessionCloseTimeoutMs,
+						attachedSessionKeys,
+						managedSessionActive ? managedSessionNamespace : undefined,
+						(owner) => {
+							persistManagedCleanup(owner, "closed");
+							retireRecordingSession(owner.sessionName, owner.namespace);
+							invalidateClosedManagedSession(owner.sessionName, owner.namespace);
+						},
+					);
+				}
+			} catch (error) {
+				if (!(error instanceof AggregateError)) throw error;
+				managedSessionCleanupError = error;
 			}
 		}));
-		managedSessionActive = false;
-		managedSessionCompatibilityWorkaround = undefined;
-		managedSessionHeadedAutosaveDisabled = false;
-		managedSessionHeadedAutosaveInterval = undefined;
-		managedSessionNamespace = undefined;
 		for (const reservation of recordingSessionTombstonesToPersist.values()) {
 			try {
 				appendRecordingReservationTransition(pi, { reservation, state: "closed" });
@@ -1410,20 +1568,37 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 				appendRecordingReservationTransition(pi, { reservation, state: "active" });
 			} catch {}
 		}
-		sessionPageState.reset();
-		traceOwners = new Map<string, TraceOwner>();
-		artifactManifest = undefined;
-		activeRecordingReservations = new Map<string, ActiveRecordingReservation>();
-		recordingSessionTombstones = new Map<string, ActiveRecordingReservation>();
-		recordingSessionTombstonesToPersist = new Map<string, ActiveRecordingReservation>();
-		attachedSessionKeys = new Set<string>();
-		networkRoutesBySession = new Map<string, NetworkRouteRecord[]>();
-		electronLaunchRecords = new Map<string, ElectronLaunchRecord>();
-		ownedElectronLaunchRecords = new Map<string, ElectronLaunchRecord>();
-		branchOwnedElectronLaunchIds = new Set<string>();
-		electronChildProcesses = new Map<string, ChildProcess>();
-		ownedManagedSessions.clear();
-		await cleanupSecureTempArtifacts({ preservePaths: preservedElectronProfileDirs });
+		if (!managedSessionCleanupError) {
+			managedSessionActive = false;
+			managedSessionCompatibilityWorkaround = undefined;
+			managedSessionHeadedAutosaveDisabled = false;
+			managedSessionHeadedAutosaveInterval = undefined;
+			managedSessionNamespace = undefined;
+			sessionPageState.reset();
+			traceOwners = new Map<string, TraceOwner>();
+			artifactManifest = undefined;
+			activeRecordingReservations = new Map<string, ActiveRecordingReservation>();
+			recordingSessionTombstones = new Map<string, ActiveRecordingReservation>();
+			recordingSessionTombstonesToPersist = new Map<string, ActiveRecordingReservation>();
+			attachedSessionKeys = new Set([...attachedSessionKeys].filter((key) => ownedManagedSessions.has(key)));
+			networkRoutesBySession = new Map<string, NetworkRouteRecord[]>();
+			electronLaunchRecords = new Map<string, ElectronLaunchRecord>();
+			ownedElectronLaunchRecords = new Map<string, ElectronLaunchRecord>();
+			branchOwnedElectronLaunchIds = new Set<string>();
+			electronChildProcesses = new Map<string, ChildProcess>();
+		}
+		for (const owner of ownedManagedSessions.values()) persistManagedCleanup(owner, "pending");
+		const persistenceFailures = flushManagedCleanup();
+		try {
+			await cleanupSecureTempArtifacts({ preservePaths: preservedElectronProfileDirs });
+		} catch (error) {
+			persistenceFailures.push(new Error(`Temporary browser artifact cleanup failed: ${truncateText(redactSensitiveText(error instanceof Error ? error.message : String(error)), 768)}`));
+		}
+		if (persistenceFailures.length > 0) {
+			const failures = [...(managedSessionCleanupError?.errors ?? []), ...persistenceFailures];
+			managedSessionCleanupError = new AggregateError(failures, truncateText(`Owned managed-session cleanup failed; retry required. ${failures.map((failure) => truncateText(redactSensitiveText(String(failure)), 768)).join("; ")}`, 4_096));
+		}
+		if (managedSessionCleanupError) throw managedSessionCleanupError;
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -1672,20 +1847,14 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 						? electronHostResult.details.namespace
 						: undefined;
 					const closedSessionIdentities = getCleanupResultsClosedManagedSessionIdentities(cleanupRecords, cleanupNamespace);
+					for (const identity of closedSessionIdentities) {
+						const owner = ownedManagedSessions.get(getAgentBrowserSessionIdentityKey(identity.sessionName, identity.namespace));
+						if (owner) persistManagedCleanup(owner, "closed");
+					}
 					syncElectronCleanupManagedSessions(ownedManagedSessions, cleanupRecords, cleanupNamespace);
 					for (const identity of closedSessionIdentities) {
 						retireRecordingSession(identity.sessionName, identity.namespace);
-						const closedSessionKey = getSessionContextKey(identity.sessionName, identity.namespace) ?? identity.sessionName;
-						clearSessionScopedBrowserState(closedSessionKey);
-						if (closedSessionKey === (getSessionContextKey(managedSessionName, managedSessionNamespace) ?? managedSessionName)) {
-							managedSessionActive = false;
-							managedSessionCompatibilityWorkaround = undefined;
-							managedSessionHeadedAutosaveDisabled = false;
-							managedSessionHeadedAutosaveInterval = undefined;
-							managedSessionNamespace = undefined;
-							freshSessionOrdinal += 1;
-							managedSessionName = createFreshSessionName(managedSessionBaseName, ephemeralSessionSeed, freshSessionOrdinal);
-						}
+						invalidateClosedManagedSession(identity.sessionName, identity.namespace);
 					}
 					if (artifactManifest) {
 						electronHostResult = {
@@ -1866,10 +2035,16 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
 					managedSessionCwd = browserRunState.managedSessionCwd;
 					managedSessionName = browserRunState.managedSessionName;
 					managedSessionNamespace = browserRunState.managedSessionNamespace;
+					const previousOwnedManagedSessions = new Map(ownedManagedSessions);
 					for (const closedSessionName of browserRunState.closedManagedSessionNames) {
 						untrackOwnedManagedSession(ownedManagedSessions, closedSessionName);
 					}
-					syncOwnedManagedSessionsFromResult(ownedManagedSessions, result, browserRunState.managedSessionCwd);
+					syncOwnedManagedSessionsFromResult(ownedManagedSessions, result, browserRunState.managedSessionCwd, ctx.cwd);
+					for (const [key, owner] of previousOwnedManagedSessions) {
+						if (!ownedManagedSessions.has(key)) persistManagedCleanup(owner, "closed");
+					}
+					for (const owner of ownedManagedSessions.values()) persistManagedCleanup(owner, "pending");
+					flushManagedCleanup();
 					mergeActiveElectronLaunchRecords(ownedElectronLaunchRecords, electronLaunchRecords, {
 						branchOwnedLaunchIds: branchOwnedElectronLaunchIds,
 						touchedLaunchIds: !result.isError

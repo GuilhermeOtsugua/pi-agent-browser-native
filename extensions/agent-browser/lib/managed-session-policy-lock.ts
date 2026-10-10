@@ -105,7 +105,30 @@ function parseTicket(content: string, token: string): number | undefined {
 	}
 }
 
+// Reserve metadata scopes synchronously so a queued removal cannot be overtaken
+// by new local readers. Entries exist only while a scope is running or queued.
+const claimMetadataTails = new Map<string, Promise<void>>();
+
+async function withClaimMetadata<T>(path: string, operation: () => Promise<T>): Promise<T> {
+	const previous = claimMetadataTails.get(path);
+	let release!: () => void;
+	const current = new Promise<void>((resolve) => { release = resolve; });
+	claimMetadataTails.set(path, current);
+	try {
+		await previous;
+		return await operation();
+	} finally {
+		if (claimMetadataTails.get(path) === current) claimMetadataTails.delete(path);
+		release();
+	}
+}
+
 async function readClaim(path: string): Promise<PolicyLockClaim | undefined> {
+	return withClaimMetadata(path, () => readClaimMetadata(path));
+}
+
+// Call only within the path's metadata scope; removal must not queue behind itself.
+async function readClaimMetadata(path: string): Promise<PolicyLockClaim | undefined> {
 	try {
 		const directory = await lstat(path);
 		const ownerPath = join(path, LOCK_OWNER_FILE);
@@ -172,27 +195,33 @@ async function ownerAlive(owner: PolicyLockOwner): Promise<boolean | undefined> 
 async function removeClaimOwnedBy(path: string, token: string): Promise<boolean> {
 	const movedPath = join(dirname(path), `.pi-agent-browser-policy-remove-${token}-${randomUUID()}`);
 	for (let attempt = 0; ; attempt++) {
-		const current = await readClaim(path);
-		if (current?.owner.token !== token) return false;
 		try {
-			await rename(path, movedPath);
+			const removed = await withClaimMetadata(path, async () => {
+				const current = await readClaimMetadata(path);
+				if (current?.owner.token !== token) return false;
+				await rename(path, movedPath);
+				return true;
+			});
+			if (!removed) return false;
 			break;
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
 			if (code === 'ENOENT') return true;
-			// Concurrent claim readers can briefly prevent directory renames on Windows.
+			// Foreign-process readers can still prevent directory renames on Windows.
 			// Retry only sharing conflicts, with fresh ownership evidence every time.
 			if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EBUSY') || attempt >= 3) return false;
 			await waitForRetry();
 		}
 	}
-	const moved = await readClaim(movedPath);
-	if (moved?.owner.token !== token) {
-		try { await rename(movedPath, path); } catch {}
-		return false;
-	}
-	await rm(movedPath, { force: true, recursive: true });
-	return true;
+	return withClaimMetadata(movedPath, async () => {
+		const moved = await readClaimMetadata(movedPath);
+		if (moved?.owner.token !== token) {
+			try { await rename(movedPath, path); } catch {}
+			return false;
+		}
+		await rm(movedPath, { force: true, recursive: true });
+		return true;
+	});
 }
 
 async function cleanDeadPolicyArtifacts(directory: string): Promise<void> {
@@ -202,6 +231,31 @@ async function cleanDeadPolicyArtifacts(directory: string): Promise<void> {
 		candidate.startsWith(".pi-agent-browser-policy-remove-")
 		|| candidate.includes(".lock-v3.candidate-"))) {
 		const path = join(directory, name);
+		if (name.includes(".lock-v3.candidate-")) {
+			const hint = /^\.pi-agent-browser-policy-[0-9a-f]{64}\.lock-v3\.candidate-([1-9][0-9]*)-(.+)$/.exec(name);
+			if (!hint) continue;
+			const pid = Number(hint[1]);
+			if (!Number.isSafeInteger(pid)) continue;
+			// A filename PID is only a reason NOT to open an in-progress candidate.
+			// Only ESRCH permits inspection; permission errors and unknown PIDs do not.
+			try {
+				process.kill(pid, 0);
+				continue;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
+			}
+			await withClaimMetadata(path, async () => {
+				const claim = await readClaimMetadata(path);
+				if (claim?.owner.pid !== pid || claim.owner.token !== hint[2]) return;
+				if (await ownerAlive(claim.owner) === false) {
+					const current = await readClaimMetadata(path);
+					if (current?.owner.pid !== pid || current.owner.token !== hint[2]
+						|| current.owner.startIdentity !== claim.owner.startIdentity) return;
+					await rm(path, { force: true, recursive: true }).catch(() => undefined);
+				}
+			});
+			continue;
+		}
 		const claim = await readClaim(path);
 		if (claim && await ownerAlive(claim.owner) === false) await rm(path, { force: true, recursive: true }).catch(() => undefined);
 	}
@@ -241,7 +295,7 @@ export async function acquireManagedSessionPolicyLock(options: {
 	const startIdentity = await readProcessStartIdentity(process.pid);
 	if (!startIdentity) return undefined;
 	const owner = { pid: process.pid, startIdentity, token, version: 3 } satisfies PolicyLockOwner;
-	const candidatePath = `${basePath}.candidate-${token}`;
+	const candidatePath = `${basePath}.candidate-${process.pid}-${token}`;
 	const claimPath = `${basePath}.claim-${token}`;
 	let claimPublished = false;
 	let lockAcquired = false;

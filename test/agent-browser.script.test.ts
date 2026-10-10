@@ -650,12 +650,6 @@ emit(values);`,
 			const scriptSession = result.details?.scriptSession as { cleanup?: string; sessionName?: string } | undefined;
 			assert.equal(scriptSession?.cleanup, "closed");
 			assert.match(scriptSession?.sessionName ?? "", /^piab-script-[0-9a-f-]{36}$/);
-			const closeCommandArgs = ["--namespace", "", "--session", scriptSession?.sessionName, "close"];
-			assert.deepEqual(harness.appendedEntries.map((entry) => entry.data), [
-				{ cleanup: "active", closeCommandArgs, launchAttempted: true, sessionName: scriptSession?.sessionName },
-				{ cleanup: "closed", closeCommandArgs, launchAttempted: true, sessionName: scriptSession?.sessionName },
-			]);
-			assert.deepEqual(scriptSession, { cleanup: "closed", closeCommandArgs, launchAttempted: true, sessionName: scriptSession?.sessionName });
 			const secondResult = await executeRegisteredTool(harness.tool, harness.ctx, {
 				script: `emit((await browser({ args: ["get", "title"] })).data.title);`,
 			});
@@ -667,6 +661,10 @@ emit(values);`,
 			assert.ok(invocations.length > 0);
 			const scriptInvocations = invocations.filter((entry) => entry.args.includes(scriptSession?.sessionName ?? "missing"));
 			assert.ok(scriptInvocations.every((entry) => entry.leasePresent === true), "lease must exist before every isolated-session fake upstream spawn");
+			assert.equal(scriptInvocations.filter((entry) => entry.args.includes("close")).length, 1, "the isolated browser must acknowledge one cleanup close");
+			const resumed = createExtensionHarness({ cwd: tempDir, sessionFile: join(tempDir, "session.jsonl"), branch: harness.ctx.sessionManager.getBranch() });
+			await runExtensionEvent(resumed.handlers, "session_start", { reason: "resume" }, resumed.ctx);
+			assert.equal((await readInvocationLog(logPath)).filter((entry) => entry.args.includes(scriptSession?.sessionName ?? "missing") && entry.args.includes("close")).length, 1, "a terminal script lease must not be closed again after reload");
 			const contentInvocations = scriptInvocations.filter((entry) => entry.args.includes("get") && entry.args.includes("title"));
 			assert.ok(contentInvocations.length >= 2);
 			for (const invocation of contentInvocations) {

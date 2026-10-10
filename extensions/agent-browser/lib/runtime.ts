@@ -57,7 +57,20 @@ const AUTH_STATE_QUERY_PARAM_PATTERN = /^(?:nonce|state)$/i;
 const AUTH_URL_CONTEXT_PATTERN = /(?:^|[./_-])(?:auth|authorize|callback|login|oauth2?|oidc|saml|sso)(?:[./?#_-]|$)/i;
 const SENSITIVE_FIELD_NAME_PATTERN =
 	/^(?:[A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret(?:[_-]?(?:key|access[_-]?key))?|token|password|passwd|credentials?|database[_-]?url|db[_-]?url|connection[_-]?string|mongo(?:db)?[_-]?uri|redis[_-]?url)|[A-Za-z0-9]*(?:apiKey|ApiKey|apikey|privateKey|PrivateKey|databaseUrl|DatabaseUrl|dbUrl|DbUrl|connectionString|ConnectionString|mongoUri|MongoUri|mongodbUri|MongodbUri|mongoDbUri|MongoDbUri|redisUrl|RedisUrl|Token|Secret|Password|Credential|Credentials)|auth(?:orization)?|bearer|client(?:_|-)?secret|cookie|id(?:_|-)?token|pass(?:word)?|proxy(?:_|-)?authorization|refresh(?:_|-)?token|sentry(?:_|-)?key|session(?:_|-)?id|set(?:_|-)?cookie|sig(?:nature)?|write(?:_|-)?key|x(?:_|-)?api(?:_|-)?key)$/i;
-const ENV_SECRET_ASSIGNMENT_PATTERN = /\b((?:export\s+)?([A-Za-z_][A-Za-z0-9_-]*)(\s*[:=]\s*))(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/g;
+const ENV_SECRET_ASSIGNMENT_PATTERN = /\b((?:export\s+)?([A-Za-z_][A-Za-z0-9_-]*)(\s*[:=]\s*))((?:Bearer|Basic)\s+\[REDACTED\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
+const SECRET_ASSIGNMENT_AT_CURSOR_PATTERN = new RegExp(ENV_SECRET_ASSIGNMENT_PATTERN.source, "iy");
+const ASSIGNMENT_PREFIX_AT_CURSOR_PATTERN = /\b(?:export\s+)?([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*/iy;
+const ASSIGNMENT_KEY_START_PATTERN = /[A-Za-z_]/;
+const ASSIGNMENT_WORD_CHARACTER_PATTERN = /[A-Za-z0-9_]/;
+const COOKIE_HEADER_PATTERN = /\b(Cookie|Set-Cookie)\s*:\s*[^\n\r]+/gi;
+const COOKIE_HEADER_AT_CURSOR_PATTERN = new RegExp(COOKIE_HEADER_PATTERN.source, "iy");
+const URL_AT_CURSOR_PATTERN = /(?:\b[A-Za-z][A-Za-z0-9+.-]*:\/\/|\/(?=[^\s])|[?#&])/iy;
+const URL_USERINFO_AT_CURSOR_PATTERN = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`/@]+@/iy;
+const URL_PARAMETER_AT_CURSOR_PATTERN = /([?#&])([^=&#\s"'`<>\])}]+)=/y;
+const URL_TEXT_DELIMITER_PATTERN = /[\s"'`<>]/;
+const UNQUOTED_ASSIGNMENT_TAIL_PATTERN = /[^\s,;]+/y;
+const QUOTED_VALUE_AT_CURSOR_PATTERN = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/y;
+const AUTH_CREDENTIAL_AT_CURSOR_PATTERN = /\b(?:(?:Authorization\s*:\s*(?:Bearer|Basic)|(?:Authorization\s+)?Bearer)\s+[^\s"',)\[\]]+|Basic\s+[A-Za-z0-9+/=]{12,})[),.]?/iy;
 
 const DEFAULT_HEADLESS_COMPAT_USER_AGENT_BY_PLATFORM: Partial<Record<NodeJS.Platform, string>> = {
 	darwin: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
@@ -173,18 +186,11 @@ function redactUrlToken(token: string): string {
 
 function redactLooseUrlParameterText(text: string): string {
 	return text.replace(/(?<![^\s"'`<>\])}])[^\s"'`<>\])}]*[?#&][^\s"'`<>\])}]*/g, (token) => {
-		const queryNames = [...token.matchAll(/[?#&]([^=&#\s"'`<>\])}]+)=/g)].map((match) => {
-			try { return decodeURIComponent((match[1] ?? "").replace(/\+/g, " ")); } catch { return match[1] ?? ""; }
-		});
+		const queryNames = [...token.matchAll(/[?#&]([^=&#\s"'`<>\])}]+)=/g)].map((match) => decodeUrlParameterName(match[1] ?? ""));
 		const authContext = AUTH_URL_CONTEXT_PATTERN.test(token) || queryNames.some(shouldRedactQueryParam);
 		return token.replace(/([?#&])([^=&#\s"'`<>\])}]+)=([^&#\s"'`<>\])}]*)/g, (match, separator: string, rawName: string, rawValue: string) => {
 			if (rawValue === "[REDACTED" || rawValue === "[REDACTED]" || /%5Bredacted%5D/i.test(rawValue)) return match;
-			let name = rawName;
-			try {
-				name = decodeURIComponent(rawName.replace(/\+/g, " "));
-			} catch {
-				// Keep the raw name when percent decoding fails.
-			}
+			const name = decodeUrlParameterName(rawName);
 			if (!shouldRedactQueryParam(name) && !(authContext && AUTH_STATE_QUERY_PARAM_PATTERN.test(name))) return match;
 			return `${separator}${rawName}=[REDACTED]`;
 		});
@@ -246,34 +252,181 @@ function findBalancedJsonEnd(text: string, startIndex: number): number | undefin
 	return undefined;
 }
 
-function redactEmbeddedStructuredText(text: string): string {
-	let output = "";
-	let cursor = 0;
+function findUrlTextEnd(text: string, start: number, parameterValue = false, publicQuestionTransitions = false): number {
+	let cursor = start;
 	while (cursor < text.length) {
 		const char = text[cursor];
+		if ((char === '"' || char === "'") && ((parameterValue && cursor === start) || text[cursor - 1] === "=")) {
+			QUOTED_VALUE_AT_CURSOR_PATTERN.lastIndex = cursor;
+			const quoted = QUOTED_VALUE_AT_CURSOR_PATTERN.exec(text);
+			if (quoted) {
+				cursor += quoted[0].length;
+				continue;
+			}
+		}
+		if (URL_TEXT_DELIMITER_PATTERN.test(char) || (parameterValue && (char === "&" || char === "#" || (publicQuestionTransitions && char === "?")))) break;
+		if (char === "{" || char === "[") {
+			const end = findBalancedJsonEnd(text, cursor);
+			if (end !== undefined) {
+				cursor = end + 1;
+				continue;
+			}
+		}
+		cursor += 1;
+	}
+	return cursor;
+}
+
+function decodeUrlParameterName(name: string): string {
+	try { return decodeURIComponent(name.replace(/\+/g, " ")); } catch { return name; }
+}
+
+function redactUrlStructuredText(token: string): string {
+	let authContext = AUTH_URL_CONTEXT_PATTERN.test(token);
+	for (const match of token.matchAll(/[?#&]([^=&#\s"'`<>\])}]+)=/g)) {
+		if (shouldRedactQueryParam(decodeUrlParameterName(match[1]))) {
+			authContext = true;
+			break;
+		}
+	}
+	let output = "";
+	let cursor = 0;
+	let plainStart = 0;
+	// Userinfo is part of the URL prefix, not an embedded JSON candidate.
+	URL_USERINFO_AT_CURSOR_PATTERN.lastIndex = 0;
+	const userinfo = URL_USERINFO_AT_CURSOR_PATTERN.exec(token);
+	if (userinfo) cursor = userinfo[0].length;
+	while (cursor < token.length) {
+		if (token[cursor] === "{" || token[cursor] === "[") {
+			const end = findBalancedJsonEnd(token, cursor);
+			if (end !== undefined) {
+				cursor = end + 1;
+				continue;
+			}
+		}
+		URL_PARAMETER_AT_CURSOR_PATTERN.lastIndex = cursor;
+		const parameter = URL_PARAMETER_AT_CURSOR_PATTERN.exec(token);
+		if (!parameter) {
+			cursor += 1;
+			continue;
+		}
+		const valueStart = cursor + parameter[0].length;
+		const name = decodeUrlParameterName(parameter[2]);
+		const sensitive = shouldRedactQueryParam(name) || (authContext && AUTH_STATE_QUERY_PARAM_PATTERN.test(name));
+		// A literal question mark remains part of an opaque credential value.
+		// Only public values permit iterative query transitions.
+		const valueEnd = findUrlTextEnd(token, valueStart, true, !sensitive);
+		output += redactEmbeddedStructuredText(token.slice(plainStart, cursor), false);
+		output += parameter[0] + (sensitive ? "[REDACTED]" : redactEmbeddedStructuredText(token.slice(valueStart, valueEnd), true, false));
+		cursor = valueEnd;
+		plainStart = cursor;
+	}
+	output += redactEmbeddedStructuredText(token.slice(plainStart), false);
+	// Canonical URL serialization happens only after recursive payload redaction.
+	return redactUrlToken(output);
+}
+
+function redactEmbeddedStructuredText(text: string, scanUrls = true, scanQueryUrls = true): string {
+	let output = "";
+	let cursor = 0;
+	let plainStart = 0;
+	while (cursor < text.length) {
+		const char = text[cursor];
+		const wordStart = ASSIGNMENT_KEY_START_PATTERN.test(char) && (cursor === 0 || !ASSIGNMENT_WORD_CHARACTER_PATTERN.test(text[cursor - 1]));
+		if (wordStart) {
+			AUTH_CREDENTIAL_AT_CURSOR_PATTERN.lastIndex = cursor;
+			const credential = AUTH_CREDENTIAL_AT_CURSOR_PATTERN.exec(text);
+			if (credential) {
+				// Keep complete auth credential lexemes together, including base64/token slashes.
+				cursor += credential[0].length;
+				continue;
+			}
+		}
+		if (scanUrls && (wordStart || char === "/" || (scanQueryUrls && (char === "?" || char === "#" || char === "&")))) {
+			URL_AT_CURSOR_PATTERN.lastIndex = cursor;
+			if (URL_AT_CURSOR_PATTERN.test(text)) {
+				URL_USERINFO_AT_CURSOR_PATTERN.lastIndex = cursor;
+				const userinfo = URL_USERINFO_AT_CURSOR_PATTERN.exec(text);
+				const end = findUrlTextEnd(text, userinfo ? cursor + userinfo[0].length : cursor);
+				if (end > cursor) {
+					output += redactLooseSensitiveText(text.slice(plainStart, cursor));
+					output += redactUrlStructuredText(text.slice(cursor, end));
+					cursor = end;
+					plainStart = cursor;
+					continue;
+				}
+			}
+		}
+		if (wordStart) {
+			URL_USERINFO_AT_CURSOR_PATTERN.lastIndex = cursor;
+			const userinfo = URL_USERINFO_AT_CURSOR_PATTERN.exec(text);
+			if (userinfo) {
+				cursor += userinfo[0].length;
+				continue;
+			}
+			COOKIE_HEADER_AT_CURSOR_PATTERN.lastIndex = cursor;
+			const cookie = COOKIE_HEADER_AT_CURSOR_PATTERN.exec(text);
+			if (cookie) {
+				// Cookie values span the complete header, including any embedded structured text.
+				output += redactLooseSensitiveText(text.slice(plainStart, cursor));
+				output += redactLooseSensitiveText(cookie[0]);
+				cursor += cookie[0].length;
+				plainStart = cursor;
+				continue;
+			}
+			ASSIGNMENT_PREFIX_AT_CURSOR_PATTERN.lastIndex = cursor;
+			const assignmentPrefix = ASSIGNMENT_PREFIX_AT_CURSOR_PATTERN.exec(text);
+			SECRET_ASSIGNMENT_AT_CURSOR_PATTERN.lastIndex = cursor;
+			const assignment = assignmentPrefix && isEnvSecretAssignmentKey(assignmentPrefix[1]) ? SECRET_ASSIGNMENT_AT_CURSOR_PATTERN.exec(text) : null;
+			if (assignment) {
+				const valueStart = cursor + assignment[1].length;
+				const valueOpener = assignment[4][0];
+				const quoted = valueOpener === '"' || valueOpener === "'";
+				const structuredEnd = valueOpener === "{" || valueOpener === "[" ? findBalancedJsonEnd(text, valueStart) : undefined;
+				if (quoted || structuredEnd !== undefined) {
+					// Credential assignment values are opaque, including quoted or nested JSON payloads.
+					output += redactLooseSensitiveText(text.slice(plainStart, cursor));
+					output += `${assignment[1]}[REDACTED]`;
+					cursor = Math.max(cursor + assignment[0].length, structuredEnd === undefined ? 0 : structuredEnd + 1);
+					if (structuredEnd !== undefined) {
+						UNQUOTED_ASSIGNMENT_TAIL_PATTERN.lastIndex = cursor;
+						const tail = UNQUOTED_ASSIGNMENT_TAIL_PATTERN.exec(text);
+						if (tail) cursor += tail[0].length;
+					}
+					plainStart = cursor;
+					continue;
+				}
+				// Preserve the complete unquoted lexeme for loose redaction, not embedded-JSON scanning.
+				cursor += assignment[0].length;
+				continue;
+			}
+		}
 		if (char !== "{" && char !== "[") {
-			output += char;
 			cursor += 1;
 			continue;
 		}
 		const endIndex = findBalancedJsonEnd(text, cursor);
 		if (endIndex === undefined) {
-			output += char;
 			cursor += 1;
 			continue;
 		}
 		const candidate = text.slice(cursor, endIndex + 1);
+		let parsed: unknown;
 		try {
-			const parsed = JSON.parse(candidate) as unknown;
-			const redacted = typeof parsed === "string" ? redactSensitiveText(parsed) : JSON.stringify(redactSensitiveValue(parsed));
-			const original = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
-			output += redacted === original ? candidate : redacted;
+			parsed = JSON.parse(candidate) as unknown;
 		} catch {
-			output += candidate;
+			cursor = endIndex + 1;
+			continue;
 		}
+		const original = JSON.stringify(parsed);
+		const redacted = JSON.stringify(redactSensitiveValue(parsed));
+		// Mask prose separately so assignment matching cannot consume JSON string delimiters.
+		output += redactLooseSensitiveText(text.slice(plainStart, cursor));
+		output += redacted === original ? candidate : redacted;
 		cursor = endIndex + 1;
+		plainStart = cursor;
 	}
-	return output;
+	return output + redactLooseSensitiveText(text.slice(plainStart));
 }
 
 function redactStandaloneBasicCredential(text: string): string {
@@ -313,27 +466,34 @@ export function isSensitiveFieldName(key: string): boolean {
 
 function isEnvSecretAssignmentKey(key: string): boolean {
 	if (!isSensitiveFieldName(key)) return false;
+	// Bare credential labels also occur in diagnostic prose, not just environment-style keys.
+	if (/^(?:token|password|passwd|secret|credentials?|auth(?:orization)?|bearer|cookie|pass|sig(?:nature)?)$/i.test(key)) return true;
 	if (key.includes("_") || key.includes("-") || key === key.toUpperCase()) return true;
 	return /(?:apiKey|ApiKey|privateKey|PrivateKey|databaseUrl|DatabaseUrl|dbUrl|DbUrl|connectionString|ConnectionString|mongoUri|MongoUri|mongodbUri|MongodbUri|mongoDbUri|MongoDbUri|redisUrl|RedisUrl|Token|Secret|Password|Credential|Credentials)$/.test(key);
 }
 
 function redactEnvSecretAssignments(text: string): string {
-	return text.replace(ENV_SECRET_ASSIGNMENT_PATTERN, (match, prefix: string, key: string) => {
+	return text.replace(ENV_SECRET_ASSIGNMENT_PATTERN, (match, prefix: string, key: string, separator: string, value: string) => {
 		if (!isEnvSecretAssignmentKey(key)) return match;
+		// Earlier credential redaction leaves HTTP schemes as useful nonsecret structure.
+		// Only colon-delimited Authorization headers with an already-masked credential qualify.
+		if (/^authorization$/i.test(key) && separator.includes(":") && /^(?:Bearer|Basic)\s+\[REDACTED\]$/i.test(value)) return match;
 		return `${prefix}[REDACTED]`;
 	});
 }
 
-export function redactSensitiveText(text: string): string {
-	return redactEmbeddedStructuredText(
-		redactEnvSecretAssignments(
-			redactStandaloneBasicCredential(
-				redactBearerCredentials(redactLooseUrlParameterText(redactLooseUrlUserinfo(redactLooseUrlMatches(text))))
-					.replace(/\b(Authorization\s*:\s*Basic)\s+[^\s",]+/gi, "$1 [REDACTED]")
-					.replace(/\b(Cookie|Set-Cookie)\s*:\s*[^\n\r"]+/gi, "$1: [REDACTED]"),
-			),
+function redactLooseSensitiveText(text: string): string {
+	return redactEnvSecretAssignments(
+		redactStandaloneBasicCredential(
+			redactBearerCredentials(redactLooseUrlParameterText(redactLooseUrlUserinfo(redactLooseUrlMatches(text))))
+				.replace(/\b(Authorization\s*:\s*Basic)\s+[^\s",]+/gi, "$1 [REDACTED]")
+				.replace(COOKIE_HEADER_PATTERN, "$1: [REDACTED]"),
 		),
 	);
+}
+
+export function redactSensitiveText(text: string): string {
+	return redactEmbeddedStructuredText(text);
 }
 
 export function redactSensitiveValue(value: unknown): unknown {
@@ -360,7 +520,7 @@ function redactFlagValue(flag: string, value: string): string {
 	if (SENSITIVE_VALUE_FLAGS.has(flag)) {
 		return "[REDACTED]";
 	}
-	return redactUrlToken(value);
+	return redactUrlToken(redactSensitiveText(value));
 }
 
 export function redactInvocationArgs(args: string[]): string[] {
@@ -385,7 +545,7 @@ export function redactInvocationArgs(args: string[]): string[] {
 			continue;
 		}
 
-		redacted.push(redactSensitiveText(redactUrlToken(token)));
+		redacted.push(redactSensitiveText(token));
 	}
 
 	const commandStartIndex = findCommandStartIndex(args);

@@ -46,7 +46,7 @@ function extractEnvelopeErrorText(error: unknown): string | undefined {
 	return fallback.length > 0 && fallback !== "{}" ? fallback : undefined;
 }
 
-export async function parseAgentBrowserEnvelope(options: string | { stdout: string; stdoutPath?: string }): Promise<{
+export async function parseAgentBrowserEnvelope(options: string | { stdout: string; stdoutPath?: string; strictEnvelope?: boolean }): Promise<{
 	envelope?: AgentBrowserEnvelope;
 	parseError?: string;
 }> {
@@ -64,17 +64,19 @@ export async function parseAgentBrowserEnvelope(options: string | { stdout: stri
 
 	try {
 		const parsed = JSON.parse(trimmed) as AgentBrowserEnvelope | AgentBrowserBatchResult[];
+		const strictEnvelope = typeof options !== "string" && options.strictEnvelope === true;
 		if (Array.isArray(parsed)) {
+			if (strictEnvelope) return { parseError: "agent-browser returned JSON, but it was not an object envelope." };
 			return { envelope: { success: parsed.every((item) => !isRecord(item) || item.success !== false), data: parsed } };
 		}
 		if (!isRecord(parsed)) {
 			return { parseError: "agent-browser returned JSON, but it was not an object envelope." };
 		}
 		const keys = Object.keys(parsed);
-		if (keys.length === 1 && keys[0] === "plugins" && Array.isArray(parsed.plugins)) {
+		if (!strictEnvelope && keys.length === 1 && keys[0] === "plugins" && Array.isArray(parsed.plugins)) {
 			return { envelope: { success: true, data: { plugins: parsed.plugins } } };
 		}
-		if (keys.length === 1 && keys[0] === "plugin" && isRecord(parsed.plugin) && !Array.isArray(parsed.plugin)) {
+		if (!strictEnvelope && keys.length === 1 && keys[0] === "plugin" && isRecord(parsed.plugin) && !Array.isArray(parsed.plugin)) {
 			return { envelope: { success: true, data: { plugin: parsed.plugin } } };
 		}
 		if (!("success" in parsed)) {

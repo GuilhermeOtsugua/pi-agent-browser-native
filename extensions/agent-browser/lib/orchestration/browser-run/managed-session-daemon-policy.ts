@@ -12,7 +12,8 @@ import { isRecord } from "../../parsing.js";
 import { getAgentBrowserProcessEnvironment } from "../../process-environment.js";
 import { runAgentBrowserProcess } from "../../process.js";
 import { getAgentBrowserErrorText, parseAgentBrowserEnvelope } from "../../results/envelope.js";
-import { redactInvocationArgs } from "../../runtime.js";
+import { redactInvocationArgs, redactSensitiveText } from "../../runtime.js";
+import { truncateText } from "../../results/text.js";
 
 const MANAGED_SESSION_DAEMON_INSPECTION_TIMEOUT_MS = 35_000;
 const RUNNING_HEADED_AUTOSAVE_POLICY_CHANGE_ERROR = "AGENT_BROWSER_AUTOSAVE_INTERVAL_MS cannot change a running wrapper-owned headed session's launch-time periodic autosave interval. Close that session first, then retry with sessionMode: \"fresh\" so the new daemon starts with the requested interval.";
@@ -179,9 +180,11 @@ export async function closeManagedSession(options: {
 			signal: controller.signal,
 		});
 		stdoutSpillPath = processResult.stdoutSpillPath;
-		if (!processResult.aborted && !processResult.spawnError && processResult.exitCode === 0) {
-			const parsed = await parseAgentBrowserEnvelope({ stdout: processResult.stdout, stdoutPath: processResult.stdoutSpillPath });
-			const data = parsed.envelope?.success === true && isRecord(parsed.envelope.data) ? parsed.envelope.data : undefined;
+		const parsed = await parseAgentBrowserEnvelope({ stdout: processResult.stdout, stdoutPath: processResult.stdoutSpillPath, strictEnvelope: true });
+		const acknowledged = !processResult.aborted && !processResult.timedOut && !processResult.spawnError
+			&& processResult.exitCode === 0 && parsed.envelope?.success === true && !parsed.parseError;
+		if (acknowledged) {
+			const data = isRecord(parsed.envelope?.data) ? parsed.envelope.data : undefined;
 			options.restoreState.clear(options.sessionName, options.namespace);
 			pruneOwnedManagedSessionRestoreSnapshots({
 				cwd: options.cwd,
@@ -190,19 +193,25 @@ export async function closeManagedSession(options: {
 				statePath: typeof data?.statePath === "string" ? data.statePath : undefined,
 			});
 		}
-		return getAgentBrowserErrorText({
+		const error = getAgentBrowserErrorText({
 			aborted: processResult.aborted,
 			command: "close",
 			effectiveArgs: redactInvocationArgs(closeArgs),
+			envelope: parsed.envelope,
 			exitCode: processResult.exitCode,
+			parseError: parsed.parseError?.startsWith("agent-browser returned invalid JSON:")
+				? "agent-browser returned invalid JSON; managed-session close was not acknowledged."
+				: parsed.parseError,
 			plainTextInspection: false,
 			spawnError: processResult.spawnError,
 			stderr: processResult.stderr,
 			timedOut: processResult.timedOut,
 			timeoutMs: processResult.timeoutMs,
 		});
+		return acknowledged ? undefined : truncateText(redactSensitiveText(error ?? "agent-browser did not acknowledge managed-session close with success:true."), 2_000);
 	} catch (error) {
-		return error instanceof Error ? error.message : String(error);
+		return truncateText(redactSensitiveText(error instanceof Error ? error.message : String(error)), 2_000)
+			|| "Managed-session cleanup failed without an error message.";
 	} finally {
 		clearTimeout(timer);
 		if (stdoutSpillPath) await rm(stdoutSpillPath, { force: true }).catch(() => undefined);

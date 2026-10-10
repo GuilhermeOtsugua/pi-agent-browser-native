@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 function run(command: string, args: string[]) {
@@ -10,6 +13,118 @@ function run(command: string, args: string[]) {
 		shell: process.platform === "win32" && command === "npm",
 	});
 }
+
+function runArtifactDoctor(root: string, env: NodeJS.ProcessEnv = process.env, inspectionRoot = root) {
+	const moduleUrl = pathToFileURL(resolve("scripts/platform-smoke/doctor.mjs")).href;
+	return spawnSync(process.execPath, ["--input-type=module", "-e", `
+		import { checkForbiddenProjectFiles } from ${JSON.stringify(moduleUrl)};
+		const failures = { count: 0 };
+		checkForbiddenProjectFiles(failures, ${JSON.stringify(inspectionRoot)});
+		console.log("ARTIFACT_FAILURES=" + failures.count);
+	`], { cwd: root, env, encoding: "utf8" });
+}
+
+function artifactFailureCount(stdout: string) {
+	return Number(stdout.match(/ARTIFACT_FAILURES=(\d+)/)?.[1] ?? Number.NaN);
+}
+
+test("doctor detects local forbidden artifacts without POSIX find", () => {
+	const root = mkdtempSync(join(tmpdir(), "piab-doctor-local-"));
+	try {
+		mkdirSync(join(root, "child"));
+		writeFileSync(join(root, "child", ".env.test"), "synthetic fixture only");
+		const result = runArtifactDoctor(root, { ...process.env, PATH: "" });
+		assert.equal(result.status, 0, result.stderr);
+		assert.match(result.stderr, /child\/\.env\.test/);
+		assert.equal(artifactFailureCount(result.stdout), 3, result.stderr);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("doctor bounds local artifact inspection and does not traverse symlinks", () => {
+	const root = mkdtempSync(join(tmpdir(), "piab-doctor-boundaries-"));
+	const outside = mkdtempSync(join(tmpdir(), "piab-doctor-outside-"));
+	try {
+		mkdirSync(join(root, "child", "deeper"), { recursive: true });
+		mkdirSync(join(root, "node_modules"), { recursive: true });
+		writeFileSync(join(root, "child", "deeper", ".env"), "synthetic deep fixture");
+		writeFileSync(join(root, "node_modules", "ignored.tgz"), "synthetic dependency fixture");
+		writeFileSync(join(root, "child", "benign.txt"), "benign fixture");
+		writeFileSync(join(outside, ".env"), "synthetic external fixture");
+		symlinkSync(outside, join(root, "linked"), process.platform === "win32" ? "junction" : "dir");
+		const clean = runArtifactDoctor(root);
+		assert.equal(clean.status, 0, clean.stderr);
+		assert.equal(artifactFailureCount(clean.stdout), 2, clean.stderr);
+		writeFileSync(join(root, "release.tgz"), "synthetic top-level fixture");
+		writeFileSync(join(root, "child", ".env.local"), "synthetic child fixture");
+		const forbidden = runArtifactDoctor(root);
+		assert.equal(forbidden.status, 0, forbidden.stderr);
+		assert.equal(artifactFailureCount(forbidden.stdout), 3, forbidden.stderr);
+		assert.match(forbidden.stderr, /child\/\.env\.local/);
+		assert.match(forbidden.stderr, /\.\/release\.tgz/);
+		assert.doesNotMatch(forbidden.stderr, /ignored\.tgz|deeper\/\.env|linked\/\.env/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(outside, { recursive: true, force: true });
+	}
+});
+
+test("doctor reports unknown artifact inspections instead of false passes", () => {
+	const root = mkdtempSync(join(tmpdir(), "piab-doctor-missing-"));
+	try {
+		const result = runArtifactDoctor(root, process.env, join(root, "missing"));
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(artifactFailureCount(result.stdout), 3, result.stderr);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("doctor inspects real npm pack contents both directly and under npm run", () => {
+	const root = mkdtempSync(join(tmpdir(), "piab-doctor-pack-"));
+	try {
+		const moduleUrl = pathToFileURL(resolve("scripts/platform-smoke/doctor.mjs")).href;
+		writeFileSync(join(root, "package.json"), JSON.stringify({
+			name: "piab-doctor-pack-fixture", version: "1.0.0", type: "module",
+			files: ["public.txt", ".debug"], scripts: { probe: "node probe.mjs" },
+		}));
+		writeFileSync(join(root, "public.txt"), "public fixture");
+		writeFileSync(join(root, "probe.mjs"), `
+			import { checkForbiddenProjectFiles } from ${JSON.stringify(moduleUrl)};
+			const failures = { count: 0 };
+			checkForbiddenProjectFiles(failures);
+			console.log("ARTIFACT_FAILURES=" + failures.count);
+		`);
+		const gitInit = spawnSync("git", ["init", "--quiet"], { cwd: root, encoding: "utf8" });
+		assert.equal(gitInit.status, 0, gitInit.stderr);
+		const direct = runArtifactDoctor(root, { ...process.env, npm_execpath: undefined });
+		assert.equal(direct.status, 0, direct.stderr);
+		assert.equal(artifactFailureCount(direct.stdout), 0, direct.stderr);
+		const npmRun = spawnSync(
+			process.env.npm_execpath ? process.execPath : process.platform === "win32" ? "cmd.exe" : "npm",
+			process.env.npm_execpath ? [process.env.npm_execpath, "run", "probe"]
+				: process.platform === "win32" ? ["/d", "/s", "/c", "npm run probe"] : ["run", "probe"],
+			{ cwd: root, encoding: "utf8" },
+		);
+		assert.equal(npmRun.status, 0, npmRun.stderr);
+		assert.equal(artifactFailureCount(npmRun.stdout), 0, npmRun.stderr);
+		mkdirSync(join(root, ".debug", "deeper"), { recursive: true });
+		writeFileSync(join(root, ".debug", "deeper", "fixture.tgz"), "forbidden packed deep fixture");
+		const forbidden = runArtifactDoctor(root);
+		assert.equal(forbidden.status, 0, forbidden.stderr);
+		assert.equal(artifactFailureCount(forbidden.stdout), 1, forbidden.stderr);
+		assert.match(forbidden.stderr, /\.debug\/deeper\/fixture\.tgz/);
+		const gitAdd = spawnSync("git", ["add", "--", ".debug/deeper/fixture.tgz"], { cwd: root, encoding: "utf8" });
+		assert.equal(gitAdd.status, 0, gitAdd.stderr);
+		const tracked = runArtifactDoctor(root);
+		assert.equal(tracked.status, 0, tracked.stderr);
+		assert.equal(artifactFailureCount(tracked.stdout), 2, tracked.stderr);
+		assert.match(tracked.stderr, /\.debug\/deeper\/fixture\.tgz/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("platform smoke scripts have working syntax and help", () => {
 	for (const path of [
